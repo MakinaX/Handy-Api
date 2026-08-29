@@ -31,6 +31,8 @@ concurrency:
 
 jobs:
   code-quality:
+    # Replaced in Handy Gemini by handy-gemini-ci.yml.
+    if: github.repository == 'cjpais/Handy'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

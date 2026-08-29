@@ -23,9 +23,10 @@ export const GeneralSettings: React.FC = () => {
       <SettingsGroup title={t("settings.general.title")}>
         <ShortcutInput shortcutId="transcribe" grouped={true} />
         <PushToTalk descriptionMode="tooltip" grouped={true} />
-        {/* Cancel shortcut is hidden with push-to-talk (release key cancels) and on Linux (dynamic shortcut instability) */}
+        {/* Escape is a fixed safety control. Keep it visible but read-only in
+            toggle mode; push-to-talk already explains its release behavior. */}
         {!isLinux && !pushToTalk && (
-          <ShortcutInput shortcutId="cancel" grouped={true} />
+          <ShortcutInput shortcutId="cancel" grouped={true} disabled={true} />
         )}
       </SettingsGroup>
       <ModelSettingsCard />

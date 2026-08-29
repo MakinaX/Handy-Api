@@ -79,4 +79,14 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn every_locale_has_gemini_cloud_label() {
+        for (locale, strings) in TRANSLATIONS.iter() {
+            assert!(
+                !strings.gemini_transcribe_cloud.trim().is_empty(),
+                "{locale} is missing the Gemini tray label"
+            );
+        }
+    }
 }

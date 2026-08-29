@@ -9,13 +9,17 @@ import {
 interface ModelDropdownProps {
   models: ModelInfo[];
   currentModelId: string;
+  transcriptionBackend: "local" | "gemini";
   onModelSelect: (modelId: string) => void;
+  onGeminiSelect: () => void;
 }
 
 const ModelDropdown: React.FC<ModelDropdownProps> = ({
   models,
   currentModelId,
+  transcriptionBackend,
   onModelSelect,
+  onGeminiSelect,
 }) => {
   const { t } = useTranslation();
   const downloadedModels = models.filter((m) => m.is_downloaded);
@@ -26,6 +30,42 @@ const ModelDropdown: React.FC<ModelDropdownProps> = ({
 
   return (
     <div className="absolute bottom-full start-0 mb-2 w-64 max-h-[60vh] overflow-y-auto bg-background border border-mid-gray/20 rounded-lg shadow-lg py-2 z-50">
+      <div
+        onClick={onGeminiSelect}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onGeminiSelect();
+          }
+        }}
+        tabIndex={0}
+        role="button"
+        className={`w-full px-3 py-2 text-start hover:bg-mid-gray/10 transition-colors cursor-pointer focus:outline-none ${
+          transcriptionBackend === "gemini"
+            ? "bg-logo-primary/10 text-logo-primary"
+            : ""
+        }`}
+      >
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-sm text-text/80">
+              {t("modelSelector.gemini.name")}
+              <span className="ms-1.5 text-[10px] font-medium text-logo-primary/70 uppercase">
+                {t("modelSelector.cloud")}
+              </span>
+            </div>
+            <div className="text-xs text-text/40 italic pe-4">
+              {t("modelSelector.gemini.description")}
+            </div>
+          </div>
+          {transcriptionBackend === "gemini" && (
+            <div className="text-xs text-logo-primary">
+              {t("modelSelector.active")}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="my-1 border-t border-mid-gray/20" />
       {downloadedModels.length > 0 ? (
         <div>
           {downloadedModels.map((model) => (
@@ -41,7 +81,7 @@ const ModelDropdown: React.FC<ModelDropdownProps> = ({
               tabIndex={0}
               role="button"
               className={`w-full px-3 py-2 text-start hover:bg-mid-gray/10 transition-colors cursor-pointer focus:outline-none ${
-                currentModelId === model.id
+                transcriptionBackend === "local" && currentModelId === model.id
                   ? "bg-logo-primary/10 text-logo-primary"
                   : ""
               }`}
@@ -65,11 +105,12 @@ const ModelDropdown: React.FC<ModelDropdownProps> = ({
                     {getTranslatedModelDescription(model, t)}
                   </div>
                 </div>
-                {currentModelId === model.id && (
-                  <div className="text-xs text-logo-primary">
-                    {t("modelSelector.active")}
-                  </div>
-                )}
+                {transcriptionBackend === "local" &&
+                  currentModelId === model.id && (
+                    <div className="text-xs text-logo-primary">
+                      {t("modelSelector.active")}
+                    </div>
+                  )}
               </div>
             </div>
           ))}

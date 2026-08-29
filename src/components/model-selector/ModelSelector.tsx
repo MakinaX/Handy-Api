@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { commands } from "@/bindings";
 import { getTranslatedModelName } from "../../lib/utils/modelTranslation";
 import { useModelStore } from "../../stores/modelStore";
+import { useSettings } from "@/hooks/useSettings";
+import { geminiCommands } from "@/lib/geminiCommands";
 import ModelStatusButton from "./ModelStatusButton";
 import ModelDropdown from "./ModelDropdown";
 import DownloadProgressDisplay from "./DownloadProgressDisplay";
@@ -35,10 +37,13 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
     extractingModels,
     selectModel,
   } = useModelStore();
+  const { getSetting } = useSettings();
+  const transcriptionBackend = getSetting("transcription_backend") ?? "local";
 
   const [modelStatus, setModelStatus] = useState<ModelStatus>("unloaded");
   const [modelError, setModelError] = useState<string | null>(null);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
+  const [geminiConfigured, setGeminiConfigured] = useState(false);
   // Track pending model switch for optimistic display
   const [pendingModelId, setPendingModelId] = useState<string | null>(null);
 
@@ -49,6 +54,19 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
   // Check model status when currentModel changes
   useEffect(() => {
     const checkStatus = async () => {
+      if (transcriptionBackend === "gemini") {
+        try {
+          const configured = await geminiCommands.keyConfigured();
+          setGeminiConfigured(configured);
+          setModelStatus(configured ? "ready" : "unloaded");
+          setModelError(null);
+        } catch {
+          setGeminiConfigured(false);
+          setModelStatus("error");
+          setModelError(t("settings.gemini.connection.error"));
+        }
+        return;
+      }
       if (currentModel) {
         try {
           const statusResult = await commands.getTranscriptionModelStatus();
@@ -66,7 +84,19 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
       }
     };
     checkStatus();
-  }, [currentModel]);
+  }, [currentModel, transcriptionBackend, t]);
+
+  useEffect(() => {
+    const unlisten = listen<boolean>("gemini-key-status-changed", (event) => {
+      setGeminiConfigured(event.payload);
+      if (transcriptionBackend === "gemini") {
+        setModelStatus(event.payload ? "ready" : "unloaded");
+      }
+    });
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, [transcriptionBackend]);
 
   useEffect(() => {
     // Listen for model loading lifecycle events
@@ -105,7 +135,9 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
         setTimeout(async () => {
           try {
             const isRecording = await commands.isRecording();
-            if (!isRecording) {
+            // A background local-model download must never pull an active
+            // cloud operation back to Local. Auto-selection is local-only.
+            if (!isRecording && transcriptionBackend === "local") {
               setPendingModelId(modelId);
               setModelError(null);
               setShowModelDropdown(false);
@@ -138,14 +170,25 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
       modelStateUnlisten.then((fn) => fn());
       downloadCompleteUnlisten.then((fn) => fn());
     };
-  }, [selectModel]);
+  }, [selectModel, transcriptionBackend]);
 
   const handleModelSelect = async (modelId: string) => {
     setPendingModelId(modelId);
     setModelError(null);
     setShowModelDropdown(false);
-    const success = await selectModel(modelId);
-    if (!success) {
+    try {
+      const success = await selectModel(modelId);
+      if (success) {
+        // Commit the backend transition only after the local model has loaded.
+        // A load failure therefore leaves a working Gemini selection intact.
+        await geminiCommands.setBackend("local");
+        return;
+      }
+      setPendingModelId(null);
+      setModelStatus("error");
+      setModelError("Failed to switch model");
+      onError?.("Failed to switch model");
+    } catch {
       setPendingModelId(null);
       setModelStatus("error");
       setModelError("Failed to switch model");
@@ -153,7 +196,31 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
     }
   };
 
+  const handleGeminiSelect = async () => {
+    setPendingModelId(null);
+    setModelError(null);
+    setShowModelDropdown(false);
+    try {
+      // Use the command directly so persistence errors are observable here;
+      // the settings-changed event refreshes the store after success.
+      await geminiCommands.setBackend("gemini");
+      const configured = await geminiCommands.keyConfigured();
+      setGeminiConfigured(configured);
+      setModelStatus(configured ? "ready" : "unloaded");
+    } catch {
+      setModelStatus("error");
+      setModelError(t("settings.gemini.connection.error"));
+      onError?.(t("settings.gemini.connection.error"));
+    }
+  };
+
   const getModelDisplayText = (): string => {
+    if (transcriptionBackend === "gemini") {
+      return geminiConfigured
+        ? t("modelSelector.gemini.name")
+        : t("modelSelector.gemini.configureKey");
+    }
+
     const verifyingKeys = Object.keys(verifyingModels);
     if (verifyingKeys.length > 0) {
       if (verifyingKeys.length === 1) {
@@ -236,6 +303,9 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
 
   // Derive display status from model status + store state
   const getDisplayStatus = (): ModelStatus => {
+    if (transcriptionBackend === "gemini") {
+      return geminiConfigured ? "ready" : modelStatus;
+    }
     if (Object.keys(verifyingModels).length > 0) return "verifying";
     if (Object.keys(extractingModels).length > 0) return "extracting";
     if (Object.keys(downloadProgress).length > 0) return "downloading";
@@ -258,7 +328,9 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ onError }) => {
           <ModelDropdown
             models={models}
             currentModelId={displayModelId}
+            transcriptionBackend={transcriptionBackend}
             onModelSelect={handleModelSelect}
+            onGeminiSelect={() => void handleGeminiSelect()}
           />
         )}
       </div>

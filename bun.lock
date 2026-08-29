@@ -1,9 +1,8 @@
 {
   "lockfileVersion": 1,
-  "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "handy-app",
+      "name": "handy-gemini",
       "dependencies": {
         "@tailwindcss/vite": "^4.1.16",
         "@tauri-apps/api": "^2.11.0",

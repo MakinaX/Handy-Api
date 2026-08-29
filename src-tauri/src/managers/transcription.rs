@@ -244,6 +244,14 @@ impl Drop for StreamWorkerGuard {
     }
 }
 
+fn loaded_engine_matches_selection(
+    current_model_id: Option<&str>,
+    selected_model: &str,
+    model_is_loaded: bool,
+) -> bool {
+    model_is_loaded && current_model_id == Some(selected_model)
+}
+
 #[derive(Clone)]
 pub struct TranscriptionManager {
     engine: Arc<Mutex<Option<LoadedEngine>>>,
@@ -343,6 +351,29 @@ impl TranscriptionManager {
                         if idle_ms > limit_ms {
                             // idle -> unload
                             if manager_cloned.is_model_loaded() {
+                                // Close the stop->provider gap that
+                                // `is_recording()` cannot see: operation arming
+                                // and engine mutation compete on one atomic
+                                // reservation, so either this unload wins first
+                                // or the whole transaction keeps its engine.
+                                let Some(audio_manager) =
+                                    app_handle_cloned.try_state::<Arc<AudioRecordingManager>>()
+                                else {
+                                    warn!(
+                                        "Skipping idle model unload: audio operation state unavailable"
+                                    );
+                                    continue;
+                                };
+                                let Some(_engine_mutation_guard) =
+                                    audio_manager.try_start_local_engine_mutation()
+                                else {
+                                    manager_cloned.touch_activity();
+                                    debug!(
+                                        "Skipping idle model unload: transcription operation or engine mutation active"
+                                    );
+                                    continue;
+                                };
+
                                 let unload_start = std::time::Instant::now();
                                 info!(
                                     "Model idle for {}s (limit: {}s), unloading",
@@ -732,14 +763,35 @@ impl TranscriptionManager {
 
     /// Kicks off the model loading in a background thread if it's not already loaded
     pub fn initiate_model_load(&self) {
+        self.initiate_model_load_with_settings(get_settings(&self.app_handle));
+    }
+
+    /// Operation-scoped model load. The selected model belongs to the shortcut
+    /// snapshot rather than mutable settings that may change while recording.
+    pub fn initiate_model_load_with_settings(&self, settings: AppSettings) {
         let mut is_loading = self.is_loading.lock().unwrap();
         if *is_loading {
             return;
         }
 
         let reload_pending = self.reload_model_on_next_use.load(Ordering::Acquire);
-        if !reload_pending && self.is_model_loaded() {
+        let model_is_loaded = self.is_model_loaded();
+        let current_model_id = self.get_current_model();
+        if !reload_pending
+            && loaded_engine_matches_selection(
+                current_model_id.as_deref(),
+                &settings.selected_model,
+                model_is_loaded,
+            )
+        {
             return;
+        }
+        if model_is_loaded && current_model_id.as_deref() != Some(settings.selected_model.as_str())
+        {
+            warn!(
+                "Loaded model {:?} does not match operation snapshot '{}'; reloading",
+                current_model_id, settings.selected_model
+            );
         }
 
         *is_loading = true;
@@ -750,7 +802,6 @@ impl TranscriptionManager {
                     .reload_model_on_next_use
                     .store(false, Ordering::Release);
             }
-            let settings = get_settings(&self_clone.app_handle);
             if let Err(e) = self_clone.load_model(&settings.selected_model) {
                 error!("Failed to load model: {}", e);
             }
@@ -801,7 +852,9 @@ impl TranscriptionManager {
     /// model can't stream, the worker idles until finalize/cancel and reports
     /// `None` so the caller falls back to batch transcription. Frames sent
     /// before the stream begins queue on the channel and are not lost.
-    pub fn start_stream(&self) {
+    /// Begin streaming with the immutable settings captured for this shortcut
+    /// operation.
+    pub fn start_stream_with_settings(&self, settings: AppSettings) {
         if self.router.is_open() || self.active_stream_worker.load(Ordering::Acquire) != 0 {
             warn!("start_stream called while a stream worker is already active");
             return;
@@ -819,10 +872,15 @@ impl TranscriptionManager {
         self.stream_active.store(false, Ordering::Release);
 
         let manager = self.clone();
-        thread::spawn(move || manager.run_stream_worker(rx, worker_id));
+        thread::spawn(move || manager.run_stream_worker(rx, worker_id, settings));
     }
 
-    fn run_stream_worker(&self, rx: mpsc::Receiver<StreamCmd>, worker_id: u64) {
+    fn run_stream_worker(
+        &self,
+        rx: mpsc::Receiver<StreamCmd>,
+        worker_id: u64,
+        settings: AppSettings,
+    ) {
         let _worker = StreamWorkerGuard {
             worker_id,
             active_stream_worker: Arc::clone(&self.active_stream_worker),
@@ -839,7 +897,22 @@ impl TranscriptionManager {
             }
         }
 
-        let model_id = self.get_current_model().unwrap_or_default();
+        let current_model_id = self.get_current_model();
+        if !loaded_engine_matches_selection(
+            current_model_id.as_deref(),
+            &settings.selected_model,
+            self.is_model_loaded(),
+        ) {
+            warn!(
+                "Live preview: loaded model {:?} does not match operation snapshot '{}'; \
+                 falling back without leasing the stale engine",
+                current_model_id, settings.selected_model
+            );
+            self.router.clear();
+            drain_until_finalize(rx);
+            return;
+        }
+        let model_id = current_model_id.unwrap_or_default();
 
         // Take the engine out of the mutex so we own it during streaming,
         // structurally excluding any concurrent batch transcription (which
@@ -917,7 +990,6 @@ impl TranscriptionManager {
 
         // Build run options mirroring the offline transcribe-cpp path: task +
         // language gated against what the model actually advertises.
-        let settings = get_settings(&self.app_handle);
         let effective_language =
             effective_language_for_model(&settings, self.model_manager.as_ref(), &model_id);
         let run_plan = transcribe_cpp_run_plan(
@@ -1102,7 +1174,9 @@ impl TranscriptionManager {
     /// to batch transcription. `Err` means finalize itself failed or timed out.
     /// A timeout may still leave the worker holding the engine, so callers
     /// should surface it instead of immediately starting a batch fallback.
-    pub fn finalize_stream(&self) -> Result<Option<String>> {
+    /// Finalize and post-correct using the operation snapshot, including its
+    /// language and custom dictionary.
+    pub fn finalize_stream_with_settings(&self, settings: &AppSettings) -> Result<Option<String>> {
         let Some(tx) = self.router.take() else {
             return Ok(None);
         };
@@ -1123,12 +1197,11 @@ impl TranscriptionManager {
             }
         };
 
-        let settings = get_settings(&self.app_handle);
         // Streaming models do not receive a decode prompt, so custom words
         // always go through the shared fuzzy post-correction path.
         let filtered = post_process_transcription_text(
             finalized.text,
-            &settings,
+            settings,
             false,
             &finalized.output_language,
             &finalized.supported_languages,
@@ -1164,6 +1237,16 @@ impl TranscriptionManager {
     }
 
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
+        let settings = get_settings(&self.app_handle);
+        self.transcribe_with_settings(audio, &settings)
+    }
+
+    /// Batch transcription using an immutable shortcut-operation snapshot.
+    pub fn transcribe_with_settings(
+        &self,
+        audio: Vec<f32>,
+        settings: &AppSettings,
+    ) -> Result<String> {
         #[cfg(debug_assertions)]
         if std::env::var("HANDY_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
             return Err(anyhow::anyhow!(
@@ -1185,38 +1268,38 @@ impl TranscriptionManager {
             return Ok(String::new());
         }
 
-        // Check if model is loaded, if not try to load it
+        // Wait for the operation-scoped load, then fail closed unless the
+        // resident engine is the exact model captured by this operation.
         {
             // If the model is loading, wait for it to complete.
             let mut is_loading = self.is_loading.lock().unwrap();
             while *is_loading {
                 is_loading = self.loading_condvar.wait(is_loading).unwrap();
             }
-
-            let engine_guard = self.lock_engine();
-            if engine_guard.is_none() {
-                return Err(anyhow::anyhow!("Model is not loaded for transcription."));
-            }
+        }
+        let current_model_id = self.get_current_model();
+        if !loaded_engine_matches_selection(
+            current_model_id.as_deref(),
+            &settings.selected_model,
+            self.is_model_loaded(),
+        ) {
+            return Err(anyhow::anyhow!(
+                "Loaded model does not match the operation snapshot (expected '{}', found {:?}).",
+                settings.selected_model,
+                current_model_id
+            ));
         }
 
-        // Get current settings for configuration
-        let settings = get_settings(&self.app_handle);
-
         // Validate selected language against the model's supported languages.
-        // If the language isn't supported, fall back to "auto" to prevent errors.
-        // Validate against the model that's actually loaded (which can differ
-        // from settings.selected_model when a caller loaded a specific model —
-        // e.g. the --transcribe-file path's --model), not the persisted
-        // selection.
-        let active_model = self
-            .get_current_model()
-            .unwrap_or_else(|| settings.selected_model.clone());
+        // If the language isn't supported, fall back to "auto" to prevent
+        // errors. The invariant above proves this snapshot model is resident.
+        let active_model = settings.selected_model.clone();
         // Resolve the persisted language *intent* into the language this model
         // will actually use. The coercion is capability-aware (a must-pick model
         // never receives "auto") and computed fresh here — it is never written
         // back to settings, so the intent survives switching models and back.
         let validated_language =
-            effective_language_for_model(&settings, self.model_manager.as_ref(), &active_model);
+            effective_language_for_model(settings, self.model_manager.as_ref(), &active_model);
         if validated_language != settings.selected_language {
             debug!(
                 "Language intent '{}' resolved to '{}' for model '{}'",
@@ -1229,7 +1312,6 @@ impl TranscriptionManager {
         // run extension and the fuzzy-correction skip are gated on
         // `model_is_whisper` instead, since non-whisper archs can advertise
         // the feature while rejecting the whisper-kind extension.
-        let mut model_takes_initial_prompt = false;
         // Whether the loaded model is actually whisper-family (arch string).
         // Non-whisper archs (e.g. Voxtral Small) can advertise
         // Feature::InitialPrompt yet reject the whisper-kind run extension
@@ -1275,7 +1357,7 @@ impl TranscriptionManager {
             if let LoadedEngine::TranscribeCpp(session) = &engine {
                 let model = session.model();
                 let caps = model.capabilities();
-                model_takes_initial_prompt = model.supports(Feature::InitialPrompt);
+                let model_takes_initial_prompt = model.supports(Feature::InitialPrompt);
                 model_is_whisper = model.arch() == "whisper";
                 model_supports_translate = caps.supports_translate;
                 model_languages = caps.languages;
@@ -1466,7 +1548,7 @@ impl TranscriptionManager {
 
             let output_language = with_model_detected_language(
                 resolve_output_language_evidence(
-                    &settings,
+                    settings,
                     applied_language_hint.as_deref(),
                     &model_languages,
                     output_was_translated,
@@ -1485,7 +1567,7 @@ impl TranscriptionManager {
         // same as the ONNX engines.
         let filtered_result = post_process_transcription_text(
             result,
-            &settings,
+            settings,
             model_is_whisper,
             &output_language,
             &model_languages,
@@ -2146,6 +2228,26 @@ mod tests {
 
     fn languages(codes: &[&str]) -> Vec<String> {
         codes.iter().map(|code| (*code).to_string()).collect()
+    }
+
+    #[test]
+    fn loaded_engine_is_reused_only_for_the_snapshot_selection() {
+        assert!(loaded_engine_matches_selection(
+            Some("model-b"),
+            "model-b",
+            true
+        ));
+        assert!(!loaded_engine_matches_selection(
+            Some("model-a"),
+            "model-b",
+            true
+        ));
+        assert!(!loaded_engine_matches_selection(
+            Some("model-b"),
+            "model-b",
+            false
+        ));
+        assert!(!loaded_engine_matches_selection(None, "model-b", true));
     }
 
     #[test]

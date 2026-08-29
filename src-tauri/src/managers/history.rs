@@ -265,7 +265,13 @@ impl HistoryManager {
 
         debug!("Saved history entry with id {}", entry.id);
 
-        self.cleanup_old_entries()?;
+        // The INSERT above is already durable. Cleanup is best-effort
+        // maintenance; propagating its failure would make callers delete the
+        // WAV while leaving this row committed and therefore create a broken
+        // history reference.
+        if let Err(error) = self.cleanup_old_entries() {
+            error!("Failed to clean old history entries after insert: {error}");
+        }
 
         // Emit typed event for real-time frontend updates
         if let Err(e) = (HistoryUpdatePayload::Added {

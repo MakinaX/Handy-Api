@@ -3,6 +3,10 @@ use anyhow::Result;
 pub const VAD_PREFILL_FRAMES: usize = 15;
 pub const VAD_OFFLINE_HANGOVER_FRAMES: usize = 15;
 pub const VAD_STREAMING_HANGOVER_FRAMES: usize = 55;
+/// Two consecutive 30 ms positives preserve ~60 ms acknowledgements such as
+/// short Korean "네"/"응" while rejecting isolated clicks.  The speech guard
+/// is calibrated to this contract; do not raise it without re-running its
+/// short-utterance fixtures.
 pub const VAD_ONSET_FRAMES: usize = 2;
 
 pub enum VadFrame<'a> {
@@ -38,7 +42,23 @@ pub trait VoiceActivityDetector: Send + Sync {
         None
     }
 
+    /// Cumulative raw VAD decisions since the last reset.  Unlike emitted
+    /// `VadFrame::Speech` buffers, this excludes smoothing pre-roll/hangover so
+    /// it can be used as capture evidence without inflating the voiced ratio.
+    fn activity_report(&self) -> Option<VadActivityReport> {
+        None
+    }
+
     fn reset(&mut self) {}
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VadActivityReport {
+    pub analyzed_frames: usize,
+    pub voiced_frames: usize,
+    /// Number of times the detector satisfied its consecutive-frame onset
+    /// contract and entered confirmed speech.
+    pub confirmed_speech_onsets: usize,
 }
 
 /// End-of-recording snapshot of a smoothing detector's state. Voiced frames

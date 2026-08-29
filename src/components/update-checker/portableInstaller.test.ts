@@ -6,22 +6,21 @@ import {
   PORTABLE_RELEASES_URL,
 } from "./portableInstaller";
 
-const X64_SETUP =
-  "https://github.com/cjpais/Handy/releases/download/v0.9.5/Handy_0.9.5_x64-setup.exe";
-const ARM64_SETUP =
-  "https://github.com/cjpais/Handy/releases/download/v0.9.5/Handy_0.9.5_arm64-setup.exe";
+const RELEASES_BASE = PORTABLE_RELEASES_URL.replace(/\/latest$/, "");
+const X64_SETUP = `${RELEASES_BASE}/download/v0.9.6-gemini.1/Handy.Gemini_0.9.6-gemini.1_x64-setup.exe`;
+const ARM64_SETUP = `${RELEASES_BASE}/download/v0.9.6-gemini.1/Handy.Gemini_0.9.6-gemini.1_arm64-setup.exe`;
 
 // Trimmed copy of the real latest.json served from the updater endpoint.
 const manifest = {
-  version: "0.9.5",
+  version: "0.9.6-gemini.1",
   platforms: {
     "windows-x86_64-nsis": { url: X64_SETUP, signature: "…" },
     "windows-x86_64-msi": {
-      url: "https://github.com/cjpais/Handy/releases/download/v0.9.5/Handy_0.9.5_x64_en-US.msi",
+      url: `${RELEASES_BASE}/download/v0.9.6-gemini.1/Handy.Gemini_0.9.6-gemini.1_x64_en-US.msi`,
     },
     "windows-aarch64-nsis": { url: ARM64_SETUP, signature: "…" },
     "darwin-aarch64": {
-      url: "https://github.com/cjpais/Handy/releases/download/v0.9.5/Handy_aarch64.app.tar.gz",
+      url: `${RELEASES_BASE}/download/v0.9.6-gemini.1/Handy.Gemini_aarch64.app.tar.gz`,
     },
   },
 };

@@ -1,4 +1,4 @@
-use super::{VadFrame, VadTailReport, VoiceActivityDetector};
+use super::{VadActivityReport, VadFrame, VadTailReport, VoiceActivityDetector};
 use anyhow::Result;
 use std::collections::VecDeque;
 
@@ -20,6 +20,9 @@ pub struct SmoothedVad {
     hangover_counter: usize,
     onset_counter: usize,
     in_speech: bool,
+    analyzed_frames: usize,
+    voiced_frames: usize,
+    confirmed_speech_onsets: usize,
 
     temp_out: Vec<f32>,
 }
@@ -40,6 +43,9 @@ impl SmoothedVad {
             hangover_counter: 0,
             onset_counter: 0,
             in_speech: false,
+            analyzed_frames: 0,
+            voiced_frames: 0,
+            confirmed_speech_onsets: 0,
             temp_out: Vec::new(),
         }
     }
@@ -65,6 +71,8 @@ impl VoiceActivityDetector for SmoothedVad {
 
         // 2. Delegate to the wrapped boolean VAD
         let is_voice = self.inner_vad.is_voice(frame)?;
+        self.analyzed_frames += 1;
+        self.voiced_frames += usize::from(is_voice);
         if let Some(last) = self.frame_buffer.back_mut() {
             last.voiced = is_voice;
         }
@@ -76,6 +84,7 @@ impl VoiceActivityDetector for SmoothedVad {
                 if self.onset_counter >= self.onset_frames {
                     // We have enough consecutive voice frames to trigger speech
                     self.in_speech = true;
+                    self.confirmed_speech_onsets = self.confirmed_speech_onsets.saturating_add(1);
                     self.hangover_counter = self.hangover_frames;
                     self.onset_counter = 0; // Reset for next time
 
@@ -149,12 +158,23 @@ impl VoiceActivityDetector for SmoothedVad {
         })
     }
 
+    fn activity_report(&self) -> Option<VadActivityReport> {
+        Some(VadActivityReport {
+            analyzed_frames: self.analyzed_frames,
+            voiced_frames: self.voiced_frames,
+            confirmed_speech_onsets: self.confirmed_speech_onsets,
+        })
+    }
+
     fn reset(&mut self) {
         self.inner_vad.reset();
         self.frame_buffer.clear();
         self.hangover_counter = 0;
         self.onset_counter = 0;
         self.in_speech = false;
+        self.analyzed_frames = 0;
+        self.voiced_frames = 0;
+        self.confirmed_speech_onsets = 0;
         self.temp_out.clear();
     }
 }
@@ -225,5 +245,30 @@ mod tests {
         let report = vad.tail_report().unwrap();
         assert_eq!(report.withheld_frames, 2);
         assert_eq!(report.withheld_voiced_frames, 0);
+    }
+
+    #[test]
+    fn two_frame_onset_emits_short_utterance_and_reports_both_voiced_frames() {
+        let mut vad = smoothed(&[true, true], 2);
+        assert!(!vad.push_frame(&frame(0.3)).unwrap().is_speech());
+        let second_frame = frame(0.4);
+        let emitted = vad.push_frame(&second_frame).unwrap();
+        assert!(emitted.is_speech(), "second 30 ms frame must confirm onset");
+
+        let activity = vad.activity_report().unwrap();
+        assert_eq!(activity.analyzed_frames, 2);
+        assert_eq!(activity.voiced_frames, 2);
+        assert_eq!(activity.confirmed_speech_onsets, 1);
+    }
+
+    #[test]
+    fn activity_report_resets_between_sessions() {
+        let mut vad = smoothed(&[true, true, false], 2);
+        let _ = vad.push_frame(&frame(0.3)).unwrap();
+        let _ = vad.push_frame(&frame(0.4)).unwrap();
+        assert_eq!(vad.activity_report().unwrap().voiced_frames, 2);
+
+        vad.reset();
+        assert_eq!(vad.activity_report().unwrap(), VadActivityReport::default());
     }
 }

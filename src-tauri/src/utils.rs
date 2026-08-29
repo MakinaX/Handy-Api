@@ -93,6 +93,13 @@ pub fn cancel_current_operation(app: &AppHandle) {
     let audio_manager = app.state::<Arc<AudioRecordingManager>>();
     let recording_was_active = audio_manager.is_recording();
     audio_manager.cancel_recording();
+    // A direct ESC during capture has no async FinishGuard: reset the
+    // side-effect transaction here so the next F1 operation can arm. During
+    // Stopping the coordinator remains Processing and the later guard reset is
+    // harmlessly idempotent.
+    if recording_was_active {
+        audio_manager.finish_operation();
+    }
 
     // Abandon any live streaming transcription
     let tm = app.state::<Arc<TranscriptionManager>>();

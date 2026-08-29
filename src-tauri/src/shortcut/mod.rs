@@ -14,8 +14,10 @@ pub mod handy_keys;
 pub mod tauri_impl;
 
 use log::{debug, error, info, warn};
+use once_cell::sync::Lazy;
 use serde::Serialize;
 use specta::Type;
+use std::sync::mpsc;
 use tauri::{AppHandle, Emitter, Manager};
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -55,27 +57,138 @@ pub fn init_shortcuts(app: &AppHandle) {
     }
 }
 
-/// Register the cancel shortcut (called when recording starts)
-pub fn register_cancel_shortcut(app: &AppHandle) {
+enum CancelShortcutCommand {
+    Register {
+        app: Box<AppHandle>,
+        implementation: KeyboardImplementation,
+        binding: ShortcutBinding,
+        response: mpsc::Sender<Result<(), String>>,
+    },
+    Unregister,
+}
+
+fn register_cancel_backend(
+    app: &AppHandle,
+    implementation: KeyboardImplementation,
+    binding: ShortcutBinding,
+) -> Result<(), String> {
+    match implementation {
+        KeyboardImplementation::Tauri => tauri_impl::register_cancel_shortcut(app, binding),
+        KeyboardImplementation::HandyKeys => handy_keys::register_cancel_shortcut(app, binding),
+    }
+}
+
+fn unregister_cancel_backend(
+    app: &AppHandle,
+    implementation: KeyboardImplementation,
+    binding: ShortcutBinding,
+) -> Result<(), String> {
+    match implementation {
+        KeyboardImplementation::Tauri => tauri_impl::unregister_cancel_shortcut(app, binding),
+        KeyboardImplementation::HandyKeys => handy_keys::unregister_cancel_shortcut(app, binding),
+    }
+}
+
+/// One FIFO owner prevents asynchronous register/unregister tasks from
+/// reordering across adjacent transcription operations. Registration waits for
+/// completion; unregistration is queued without waiting so an ESC callback can
+/// return to the handy-keys manager thread instead of deadlocking it.
+static CANCEL_SHORTCUT_COMMANDS: Lazy<mpsc::Sender<CancelShortcutCommand>> = Lazy::new(|| {
+    let (sender, receiver) = mpsc::channel::<CancelShortcutCommand>();
+    std::thread::Builder::new()
+        .name("cancel-shortcut-owner".to_string())
+        .spawn(move || {
+            let mut active: Option<(AppHandle, KeyboardImplementation, ShortcutBinding)> = None;
+            while let Ok(command) = receiver.recv() {
+                match command {
+                    CancelShortcutCommand::Register {
+                        app,
+                        implementation,
+                        binding,
+                        response,
+                    } => {
+                        let result = (|| {
+                            if let Some((old_app, old_implementation, old_binding)) = active.take()
+                            {
+                                if let Err(error) = unregister_cancel_backend(
+                                    &old_app,
+                                    old_implementation,
+                                    old_binding.clone(),
+                                ) {
+                                    active = Some((old_app, old_implementation, old_binding));
+                                    return Err(error);
+                                }
+                            }
+
+                            register_cancel_backend(&app, implementation, binding.clone())?;
+                            active = Some((*app, implementation, binding));
+                            Ok(())
+                        })();
+                        let _ = response.send(result);
+                    }
+                    CancelShortcutCommand::Unregister => {
+                        if let Some((app, implementation, binding)) = active.take() {
+                            if let Err(error) =
+                                unregister_cancel_backend(&app, implementation, binding.clone())
+                            {
+                                warn!("Failed to unregister cancel shortcut: {error}");
+                                active = Some((app, implementation, binding));
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .expect("failed to start cancel shortcut owner");
+    sender
+});
+
+/// Register Escape completely before capture begins.
+pub fn register_cancel_shortcut(app: &AppHandle) -> Result<(), String> {
     // Track recording lifecycle independently of the current implementation so
     // switching implementations mid-recording cannot leave stale fallback state.
     crate::secure_input::register_cancel_fallback(app);
 
     let settings = get_settings(app);
-    match settings.keyboard_implementation {
-        KeyboardImplementation::Tauri => tauri_impl::register_cancel_shortcut(app),
-        KeyboardImplementation::HandyKeys => handy_keys::register_cancel_shortcut(app),
+    let mut binding = settings
+        .bindings
+        .get("cancel")
+        .cloned()
+        .ok_or_else(|| "Cancel shortcut binding is missing".to_string())?;
+    // Handy Gemini's Director contract reserves literal Escape for hard
+    // cancellation. Persisted/imported settings are normalized on load, and
+    // this assignment is the final defense against a stale external edit.
+    binding.current_binding = "escape".to_string();
+    let (response, result) = mpsc::channel();
+    CANCEL_SHORTCUT_COMMANDS
+        .send(CancelShortcutCommand::Register {
+            app: Box::new(app.clone()),
+            implementation: settings.keyboard_implementation,
+            binding,
+            response,
+        })
+        .map_err(|_| "Cancel shortcut owner is unavailable".to_string())?;
+    match result.recv() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            crate::secure_input::unregister_cancel_fallback(app);
+            Err(error)
+        }
+        Err(_) => {
+            crate::secure_input::unregister_cancel_fallback(app);
+            Err("Cancel shortcut owner stopped before registration".to_string())
+        }
     }
 }
 
 /// Unregister the cancel shortcut (called when recording stops)
 pub fn unregister_cancel_shortcut(app: &AppHandle) {
     crate::secure_input::unregister_cancel_fallback(app);
-
-    let settings = get_settings(app);
-    match settings.keyboard_implementation {
-        KeyboardImplementation::Tauri => tauri_impl::unregister_cancel_shortcut(app),
-        KeyboardImplementation::HandyKeys => handy_keys::unregister_cancel_shortcut(app),
+    if CANCEL_SHORTCUT_COMMANDS
+        .send(CancelShortcutCommand::Unregister)
+        .is_err()
+    {
+        error!("Cancel shortcut owner is unavailable during unregistration");
     }
 }
 
@@ -149,11 +262,15 @@ pub fn change_binding(
         }
     };
 
-    // If this is the cancel binding, just update the settings and return
-    // It's managed dynamically, so we don't register/unregister here
+    // Escape is a fixed safety control in Handy Gemini. Other shortcuts remain
+    // configurable, but allowing this one to drift would silently break the
+    // hard cancellation contract.
     if id == "cancel" {
+        if !binding.trim().eq_ignore_ascii_case("escape") {
+            return Err("The cancel shortcut is fixed to Escape in Handy Gemini".to_string());
+        }
         if let Some(mut b) = settings.bindings.get(&id).cloned() {
-            b.current_binding = binding;
+            b.current_binding = "escape".to_string();
             settings.bindings.insert(id.clone(), b.clone());
             settings::write_settings(&app, settings);
             crate::secure_input::reconcile_fallback(&app);

@@ -8,6 +8,8 @@ import type {
   OrtAcceleratorSetting,
 } from "@/bindings";
 import { commands } from "@/bindings";
+import { geminiCommands } from "@/lib/geminiCommands";
+import type { GeminiTranscriptionMode, TranscriptionBackend } from "@/bindings";
 
 interface SettingsStore {
   settings: Settings | null;
@@ -76,6 +78,11 @@ const DEFAULT_AUDIO_DEVICE: AudioDevice = {
 const settingUpdaters: {
   [K in keyof Settings]?: (value: Settings[K]) => Promise<unknown>;
 } = {
+  transcription_backend: (value) =>
+    geminiCommands.setBackend(value as TranscriptionBackend),
+  gemini_transcription_mode: (value) =>
+    geminiCommands.setMode(value as GeminiTranscriptionMode),
+  gemini_language: (value) => geminiCommands.setLanguage(value as string),
   always_on_microphone: (value) =>
     commands.updateMicrophoneMode(value as boolean),
   audio_feedback: (value) =>

@@ -5,6 +5,8 @@ use specta::Type;
 use std::collections::HashMap;
 use std::fmt;
 use tauri::AppHandle;
+#[cfg(target_os = "windows")]
+use tauri::Manager;
 use tauri_plugin_store::StoreExt;
 
 pub const APPLE_INTELLIGENCE_PROVIDER_ID: &str = "apple_intelligence";
@@ -301,6 +303,25 @@ pub enum OrtAcceleratorSetting {
     Rocm,
 }
 
+/// Selects the transcription provider without coupling cloud providers to the
+/// downloadable local-model registry. `selected_model` remains the last local
+/// model choice when this is `Gemini`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionBackend {
+    #[default]
+    Local,
+    Gemini,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GeminiTranscriptionMode {
+    #[default]
+    Smart,
+    Verbatim,
+}
+
 #[derive(Clone, Serialize, Deserialize, Type)]
 #[serde(transparent)]
 pub(crate) struct SecretMap(HashMap<String, String>);
@@ -371,6 +392,13 @@ pub struct AppSettings {
     pub whats_new_last_seen_version: String,
     #[serde(default = "default_model")]
     pub selected_model: String,
+    #[serde(default)]
+    pub transcription_backend: TranscriptionBackend,
+    #[serde(default)]
+    pub gemini_transcription_mode: GeminiTranscriptionMode,
+    /// `auto` asks Gemini to detect each utterance and preserves code-switching.
+    #[serde(default = "default_gemini_language")]
+    pub gemini_language: String,
     #[serde(default)]
     pub onboarding_completed: bool,
     #[serde(default = "default_always_on_microphone")]
@@ -487,6 +515,8 @@ fn default_model() -> String {
     "".to_string()
 }
 
+// This marker belongs to upstream Handy. Fork-additive fields rely on serde
+// defaults and must not consume the next upstream migration number.
 const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 2;
 
 fn default_settings_schema_version() -> u32 {
@@ -526,6 +556,10 @@ fn default_whats_new_last_seen_version() -> String {
 }
 
 fn default_selected_language() -> String {
+    "auto".to_string()
+}
+
+fn default_gemini_language() -> String {
     "auto".to_string()
 }
 
@@ -887,6 +921,9 @@ pub fn get_default_settings() -> AppSettings {
         show_whats_new_on_update: default_show_whats_new_on_update(),
         whats_new_last_seen_version: default_whats_new_last_seen_version(),
         selected_model: "".to_string(),
+        transcription_backend: TranscriptionBackend::Local,
+        gemini_transcription_mode: GeminiTranscriptionMode::Smart,
+        gemini_language: default_gemini_language(),
         onboarding_completed: false,
         always_on_microphone: false,
         selected_microphone: None,
@@ -1012,9 +1049,15 @@ pub fn get_settings(app: &AppHandle) -> AppSettings {
 
         settings
     } else {
-        let default_settings = get_default_settings();
-        store.set("settings", serde_json::to_value(&default_settings).unwrap());
-        default_settings
+        // A distinct bundle identifier gives Handy Gemini its own store. On the
+        // first launch only, import the official Handy preferences as a copy;
+        // subsequent reads and writes always use this fork's store.
+        let initial_settings = import_official_settings_once(app).unwrap_or_else(|| {
+            debug!("No compatible official Handy settings found for first-run import");
+            get_default_settings()
+        });
+        store.set("settings", serde_json::to_value(&initial_settings).unwrap());
+        initial_settings
     };
 
     if ensure_post_process_defaults(&mut settings) {
@@ -1108,7 +1151,6 @@ fn apply_settings_migrations(
         settings.settings_schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
         updated = true;
     }
-
     // The generic GPU choice was removed in favor of Auto or an exact device.
     // Normalize settings created by builds that exposed that short-lived option.
     if settings.transcribe_accelerator == TranscribeAcceleratorSetting::Gpu
@@ -1136,7 +1178,71 @@ fn apply_settings_migrations(
         updated = true;
     }
 
+    // Handy Gemini reserves literal Escape as the always-available hard
+    // cancel control. Preserve every other imported/custom shortcut (notably
+    // F1 transcription), but repair stale official/fork cancel bindings.
+    if let Some(cancel) = settings.bindings.get_mut("cancel") {
+        if !cancel.current_binding.eq_ignore_ascii_case("escape") {
+            cancel.current_binding = "escape".to_string();
+            updated = true;
+        }
+    } else if let Some(cancel) = get_default_settings().bindings.get("cancel").cloned() {
+        settings.bindings.insert("cancel".to_string(), cancel);
+        updated = true;
+    }
+
     updated
+}
+
+/// Read a copied official Handy store without ever opening it through the
+/// store plugin (which could otherwise mutate it). Secrets are intentionally
+/// excluded from the fork import; Gemini credentials have their own Windows
+/// Credential Manager entry.
+#[cfg(target_os = "windows")]
+fn import_official_settings_once(app: &AppHandle) -> Option<AppSettings> {
+    if crate::portable::is_portable() {
+        return None;
+    }
+
+    let fork_data_dir = app.path().app_data_dir().ok()?;
+    let official_store = official_settings_path(&fork_data_dir)?;
+    let raw = std::fs::read_to_string(&official_store).ok()?;
+    let store_value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let settings_value = store_value.get("settings")?;
+    let imported = imported_official_settings(settings_value);
+    debug!("Imported compatible preferences from official Handy");
+    Some(imported)
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn imported_official_settings(settings_value: &serde_json::Value) -> AppSettings {
+    let mut imported = serde_json::from_value::<AppSettings>(settings_value.clone())
+        .unwrap_or_else(|_| salvage_settings(settings_value));
+    apply_settings_migrations(&mut imported, settings_value);
+    // Do not create two login-started global-shortcut owners beside the
+    // official app. The user can explicitly enable fork autostart later.
+    imported.autostart_enabled = false;
+    // Provider selection/prompts are compatible, but the associated secrets
+    // are intentionally excluded. Keep post-processing off until reconfigured.
+    imported.post_process_enabled = false;
+    imported.post_process_api_keys = default_post_process_api_keys();
+    imported.transcription_backend = TranscriptionBackend::Local;
+    imported.gemini_transcription_mode = GeminiTranscriptionMode::Smart;
+    imported.gemini_language = default_gemini_language();
+    imported.settings_schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
+    imported
+}
+
+#[cfg(not(target_os = "windows"))]
+fn import_official_settings_once(_app: &AppHandle) -> Option<AppSettings> {
+    None
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn official_settings_path(fork_data_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    fork_data_dir
+        .parent()
+        .map(|parent| parent.join("com.pais.handy").join(SETTINGS_STORE_PATH))
 }
 
 pub fn write_settings(app: &AppHandle, settings: AppSettings) {
@@ -1421,10 +1527,71 @@ mod tests {
     fn default_settings_disable_auto_submit() {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
+        assert_eq!(settings.transcription_backend, TranscriptionBackend::Local);
+        assert_eq!(
+            settings.gemini_transcription_mode,
+            GeminiTranscriptionMode::Smart
+        );
+        assert_eq!(settings.gemini_language, "auto");
         assert_eq!(settings.auto_submit_key, AutoSubmitKey::Enter);
         assert_eq!(
             settings.settings_schema_version,
             CURRENT_SETTINGS_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn official_import_preserves_f1_dictionary_and_devices_but_excludes_secrets() {
+        let mut stored = default_settings_json();
+        stored["bindings"]["transcribe"]["current_binding"] = serde_json::json!("f1");
+        stored["bindings"]["cancel"]["current_binding"] = serde_json::json!("ctrl+escape");
+        stored["selected_microphone"] = serde_json::json!("Director Mic");
+        stored["selected_output_device"] = serde_json::json!("Director Speakers");
+        stored["custom_words"] = serde_json::json!(["GPT-5.6 Sol", "ProjectX"]);
+        stored["post_process_api_keys"] = serde_json::json!({ "openai": "secret" });
+        stored["post_process_enabled"] = serde_json::json!(true);
+        stored["autostart_enabled"] = serde_json::json!(true);
+        stored["transcription_backend"] = serde_json::json!("gemini");
+        stored["gemini_transcription_mode"] = serde_json::json!("verbatim");
+        stored["gemini_language"] = serde_json::json!("ko-KR");
+
+        let imported = imported_official_settings(&stored);
+        assert_eq!(imported.bindings["transcribe"].current_binding, "f1");
+        assert_eq!(imported.bindings["cancel"].current_binding, "escape");
+        assert_eq!(
+            imported.selected_microphone.as_deref(),
+            Some("Director Mic")
+        );
+        assert_eq!(
+            imported.selected_output_device.as_deref(),
+            Some("Director Speakers")
+        );
+        assert_eq!(
+            imported.custom_words,
+            vec!["GPT-5.6 Sol".to_string(), "ProjectX".to_string()]
+        );
+        assert!(imported
+            .post_process_api_keys
+            .values()
+            .all(|value| value.is_empty()));
+        assert!(!imported.post_process_enabled);
+        assert!(!imported.autostart_enabled);
+        assert_eq!(imported.transcription_backend, TranscriptionBackend::Local);
+        assert_eq!(
+            imported.gemini_transcription_mode,
+            GeminiTranscriptionMode::Smart
+        );
+        assert_eq!(imported.gemini_language, "auto");
+    }
+
+    #[test]
+    fn official_store_path_is_a_sibling_of_the_fork_store() {
+        let fork = std::path::Path::new("/profiles/computer.handy.gemini");
+        assert_eq!(
+            official_settings_path(fork),
+            Some(std::path::PathBuf::from(
+                "/profiles/com.pais.handy/settings_store.json"
+            ))
         );
     }
 

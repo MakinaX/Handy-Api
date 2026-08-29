@@ -1,4 +1,6 @@
 // Re-export all audio components
+pub use crate::speech_guard::{CaptureEvidence, CapturedAudio};
+
 mod device;
 mod recorder;
 mod resampler;

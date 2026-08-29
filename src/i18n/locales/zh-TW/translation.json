@@ -5,6 +5,7 @@
     "copyLastTranscript": "複製最新轉錄",
     "unloadModel": "卸載模型",
     "model": "模型",
+    "geminiTranscribeCloud": "Gemini Transcribe (雲端)",
     "quit": "結束",
     "cancel": "取消",
     "secureInputWarning": "⚠ 快捷鍵被 Secure Input 阻擋"
@@ -121,6 +122,12 @@
     }
   },
   "modelSelector": {
+    "cloud": "Cloud",
+    "gemini": {
+      "name": "Gemini Transcribe",
+      "description": "Cloud transcription with Smart and Verbatim modes",
+      "configureKey": "Configure Gemini API key"
+    },
     "custom": "自訂",
     "streaming": "串流",
     "active": "使用中",
@@ -155,6 +162,38 @@
     "legacy": "舊版"
   },
   "settings": {
+    "gemini": {
+      "title": "Gemini Transcribe (Cloud)",
+      "apiKey": {
+        "title": "API Key",
+        "description": "Stored securely in Windows Credential Manager and never shown again.",
+        "placeholder": "Enter your Gemini API key",
+        "configured": "API key configured",
+        "save": "Save",
+        "saving": "Saving...",
+        "saved": "Gemini API key saved",
+        "saveError": "Could not save the Gemini API key"
+      },
+      "connection": {
+        "test": "Test connection",
+        "testing": "Testing...",
+        "success": "Gemini connection succeeded",
+        "error": "Gemini connection failed"
+      },
+      "mode": {
+        "title": "Mode",
+        "description": "Smart improves formatting; Verbatim preserves the exact spoken form.",
+        "smart": "Smart",
+        "verbatim": "Verbatim"
+      },
+      "language": {
+        "title": "Language",
+        "description": "Auto supports Korean and English code-switching.",
+        "auto": "Auto",
+        "korean": "Korean",
+        "english": "English"
+      }
+    },
     "modelSettings": {
       "title": "{{model}} 設定"
     },

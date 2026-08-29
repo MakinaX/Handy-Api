@@ -4,7 +4,7 @@ use crate::audio_toolkit::{
         SmoothedVad, VAD_OFFLINE_HANGOVER_FRAMES, VAD_ONSET_FRAMES, VAD_PREFILL_FRAMES,
         VAD_STREAMING_HANGOVER_FRAMES,
     },
-    AudioRecorder, SileroVad, VadPolicy,
+    AudioRecorder, CaptureEvidence, CapturedAudio, SileroVad, VadPolicy,
 };
 use crate::helpers::clamshell;
 use crate::managers::transcription::StreamRouter;
@@ -12,13 +12,120 @@ use crate::settings::{get_settings, write_settings, AppSettings};
 use crate::utils;
 use log::{debug, error, info, trace, warn};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const VAD_THRESHOLD: f32 = 0.3;
+const SIDE_EFFECT_IDLE: u8 = 0;
+const SIDE_EFFECT_PENDING: u8 = 1;
+const SIDE_EFFECT_CANCELLED: u8 = 2;
+const SIDE_EFFECT_PASTE_COMMITTED: u8 = 3;
+const SIDE_EFFECT_ENGINE_MUTATING: u8 = 4;
+const UPLOAD_IDLE: u8 = 0;
+const UPLOAD_READY: u8 = 1;
+const UPLOAD_STARTED: u8 = 2;
+const UPLOAD_CANCELLED: u8 = 3;
+
+fn cancel_pending_side_effect(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            SIDE_EFFECT_PENDING,
+            SIDE_EFFECT_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+fn claim_pending_operation(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            SIDE_EFFECT_IDLE,
+            SIDE_EFFECT_PENDING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+fn claim_engine_mutation(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            SIDE_EFFECT_IDLE,
+            SIDE_EFFECT_ENGINE_MUTATING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+fn release_engine_mutation(state: &AtomicU8) {
+    let _ = state.compare_exchange(
+        SIDE_EFFECT_ENGINE_MUTATING,
+        SIDE_EFFECT_IDLE,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+}
+
+fn finish_pending_operation(state: &AtomicU8) {
+    loop {
+        let current = state.load(Ordering::Acquire);
+        if !matches!(
+            current,
+            SIDE_EFFECT_PENDING | SIDE_EFFECT_CANCELLED | SIDE_EFFECT_PASTE_COMMITTED
+        ) {
+            return;
+        }
+        if state
+            .compare_exchange(
+                current,
+                SIDE_EFFECT_IDLE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
+fn claim_pending_paste(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            SIDE_EFFECT_PENDING,
+            SIDE_EFFECT_PASTE_COMMITTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+fn cancel_pending_upload(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            UPLOAD_READY,
+            UPLOAD_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+fn claim_pending_upload(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            UPLOAD_READY,
+            UPLOAD_STARTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
 
 fn set_mute(mute: bool) {
     // Expected behavior:
@@ -341,6 +448,19 @@ impl RecordingReadiness {
     }
 }
 
+/// Exclusive reservation for a local engine mutation (switch, unload, or
+/// active-model deletion). It shares the existing operation transaction state,
+/// so an engine mutation and a transcription arm have one atomic ordering.
+pub struct LocalEngineMutationGuard {
+    side_effect_state: Arc<AtomicU8>,
+}
+
+impl Drop for LocalEngineMutationGuard {
+    fn drop(&mut self) {
+        release_engine_mutation(&self.side_effect_state);
+    }
+}
+
 #[derive(Clone)]
 pub struct AudioRecordingManager {
     /// Never assign through this directly — route every write through
@@ -355,6 +475,12 @@ pub struct AudioRecordingManager {
     mute_state: Arc<Mutex<MuteState>>,
     close_generation: Arc<AtomicU64>,
     cancel_generation: Arc<AtomicU64>,
+    /// Cancellation generation captured at `arm_operation`. Stop must use this
+    /// immutable value rather than sampling the current generation: if ESC and
+    /// normal stop race, sampling after ESC would otherwise treat the cancelled
+    /// generation as the operation's baseline and could still start a provider
+    /// request (the paste CAS would catch it only much later).
+    operation_cancel_generation: Arc<AtomicU64>,
     stream_router: Arc<StreamRouter>,
     /// Lock-free mirror of "is the state in {Recording, Stopping}",
     /// maintained by `set_state()`. The hot-path `is_recording()` reads THIS
@@ -373,6 +499,19 @@ pub struct AudioRecordingManager {
     /// so the retry re-enumerates. The system-default case is never cached —
     /// the recorder resolves the current default itself, cheaply.
     cached_device: Arc<Mutex<Option<(String, cpal::Device)>>>,
+    /// Immutable settings captured when the shortcut starts. Provider, mode,
+    /// language, vocabulary, and post-processing choices for one operation
+    /// must not change merely because the settings UI is edited mid-recording.
+    session_settings: Arc<Mutex<Option<AppSettings>>>,
+    /// Transaction state shared by operation arming, local engine mutations,
+    /// Escape, and the final paste. An engine mutation can reserve Idle only
+    /// when no operation is pending; once armed, Escape wins while Pending,
+    /// while a PasteCommitted result is no longer cancellable.
+    side_effect_state: Arc<AtomicU8>,
+    /// Atomic admission point shared by Gemini upload and ESC. Whichever CAS
+    /// wins defines cancelled-before-send versus in-flight-then-aborted; this
+    /// removes the unavoidable check-then-network race of a generation read.
+    upload_state: Arc<AtomicU8>,
 }
 
 impl AudioRecordingManager {
@@ -400,10 +539,14 @@ impl AudioRecordingManager {
             mute_state: Arc::new(Mutex::new(MuteState::default())),
             close_generation: Arc::new(AtomicU64::new(0)),
             cancel_generation: Arc::new(AtomicU64::new(0)),
+            operation_cancel_generation: Arc::new(AtomicU64::new(0)),
             stream_router,
             recording_active: Arc::new(AtomicBool::new(false)),
             capture_generation: Arc::new(AtomicU64::new(0)),
             cached_device: Arc::new(Mutex::new(None)),
+            session_settings: Arc::new(Mutex::new(None)),
+            side_effect_state: Arc::new(AtomicU8::new(SIDE_EFFECT_IDLE)),
+            upload_state: Arc::new(AtomicU8::new(UPLOAD_IDLE)),
         };
 
         // Always-on?  Open immediately.
@@ -796,10 +939,20 @@ impl AudioRecordingManager {
         &self,
         binding_id: &str,
         vad_policy: VadPolicy,
+        cancel_generation: u64,
     ) -> Result<RecordingReadiness, String> {
         let mut state = self.state.lock().unwrap();
 
         if let RecordingState::Idle = *state {
+            // Escape may arrive immediately after its registration completes
+            // but before this worker acquires the recording lock. Never open a
+            // microphone for an operation whose pending transaction was
+            // already cancelled.
+            if self.was_cancelled_since(cancel_generation)
+                || self.side_effect_state.load(Ordering::Acquire) != SIDE_EFFECT_PENDING
+            {
+                return Err("Operation cancelled before microphone capture".to_string());
+            }
             // Cancel any pending lazy close (no-op in always-on mode, where
             // closes are never scheduled).
             self.close_generation.fetch_add(1, Ordering::SeqCst);
@@ -812,6 +965,19 @@ impl AudioRecordingManager {
                 let msg = format!("{e}");
                 error!("Failed to open microphone stream: {msg}");
                 return Err(msg);
+            }
+
+            // If Escape races the potentially slow device open, the cancel
+            // path will block on `state`. Detect it here before recorder start;
+            // if it lands after this check, it observes Recording as soon as
+            // this lock is released and immediately stops/discards the stream.
+            if self.was_cancelled_since(cancel_generation)
+                || self.side_effect_state.load(Ordering::Acquire) != SIDE_EFFECT_PENDING
+            {
+                if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
+                    self.stop_microphone_stream();
+                }
+                return Err("Operation cancelled before microphone capture".to_string());
             }
 
             if let Some(rec) = self.recorder.lock().unwrap().as_ref() {
@@ -901,11 +1067,76 @@ impl AudioRecordingManager {
         self.cancel_generation.load(Ordering::Acquire)
     }
 
+    /// Arm one immutable transcription transaction before Escape is
+    /// registered or microphone capture can begin. The returned generation is
+    /// used to detect an ESC that lands in the registration window.
+    pub fn arm_operation(&self, settings: AppSettings) -> Result<u64, String> {
+        if !matches!(*self.state.lock().unwrap(), RecordingState::Idle) {
+            return Err("A transcription operation is already active".to_string());
+        }
+        // Capture before publishing Pending. A concurrent cancel either sees
+        // Idle (and is irrelevant to this not-yet-armed operation) or sees
+        // Pending and increments away from this immutable baseline.
+        let cancel_generation = self.cancel_generation();
+        if !claim_pending_operation(&self.side_effect_state) {
+            return Err("A transcription side-effect transaction is already active".to_string());
+        }
+        self.operation_cancel_generation
+            .store(cancel_generation, Ordering::Release);
+        self.upload_state.store(UPLOAD_READY, Ordering::Release);
+        *self.session_settings.lock().unwrap() = Some(settings);
+        Ok(cancel_generation)
+    }
+
+    pub fn operation_cancel_generation(&self) -> u64 {
+        self.operation_cancel_generation.load(Ordering::Acquire)
+    }
+
     pub fn was_cancelled_since(&self, generation: u64) -> bool {
         self.cancel_generation.load(Ordering::Acquire) != generation
     }
 
-    pub fn stop_recording(&self, binding_id: &str, cancel_generation: u64) -> Option<Vec<f32>> {
+    /// Atomically commit the only irreversible side effect. This CAS and the
+    /// matching cancellation CAS define a single total order for ESC vs paste.
+    pub fn try_claim_paste(&self, cancel_generation: u64) -> bool {
+        if self.was_cancelled_since(cancel_generation) {
+            return false;
+        }
+        claim_pending_paste(&self.side_effect_state)
+    }
+
+    /// Linearize Gemini network admission against ESC. A successful claim
+    /// means a later ESC treats the request as in-flight and logically aborts
+    /// its delivery; failure means the request future must never be polled.
+    pub fn try_claim_upload_start(&self, cancel_generation: u64) -> bool {
+        if self.was_cancelled_since(cancel_generation) {
+            return false;
+        }
+        claim_pending_upload(&self.upload_state)
+    }
+
+    /// Reserve the local engine for a switch, unload, or active-model deletion.
+    /// This is mutually exclusive with `arm_operation`, including the recording
+    /// and provider-pending phases where `is_recording()` alone is already false.
+    pub fn try_start_local_engine_mutation(&self) -> Option<LocalEngineMutationGuard> {
+        claim_engine_mutation(&self.side_effect_state).then(|| LocalEngineMutationGuard {
+            side_effect_state: Arc::clone(&self.side_effect_state),
+        })
+    }
+
+    pub fn finish_operation(&self) {
+        // Never clear a concurrent engine-mutation reservation. Normal operation
+        // outcomes are the only states this lifecycle method owns.
+        finish_pending_operation(&self.side_effect_state);
+        self.upload_state.store(UPLOAD_IDLE, Ordering::Release);
+        self.session_settings.lock().unwrap().take();
+    }
+
+    pub fn stop_recording(
+        &self,
+        binding_id: &str,
+        cancel_generation: u64,
+    ) -> Option<CapturedAudio> {
         self.invalidate_recording_readiness();
         let mut state = self.state.lock().unwrap();
 
@@ -919,7 +1150,12 @@ impl AudioRecordingManager {
                 // Optionally keep recording for a bit longer to capture trailing audio.
                 // This is only the explicit user setting; streaming VAD must not add
                 // hidden post-release capture time.
-                let settings = get_settings(&self.app_handle);
+                let settings = self
+                    .session_settings
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| get_settings(&self.app_handle));
                 let buffer_ms = settings.extra_recording_buffer_ms;
                 if buffer_ms > 0 {
                     debug!(
@@ -938,17 +1174,17 @@ impl AudioRecordingManager {
                     }
                 }
 
-                let samples = if let Some(rec) = self.recorder.lock().unwrap().as_ref() {
+                let mut captured = if let Some(rec) = self.recorder.lock().unwrap().as_ref() {
                     match rec.stop() {
-                        Ok(buf) => buf,
+                        Ok(captured) => captured,
                         Err(e) => {
                             error!("stop() failed: {e}");
-                            Vec::new()
+                            CapturedAudio::new(Vec::new(), CaptureEvidence::empty(0))
                         }
                     }
                 } else {
                     error!("Recorder not available");
-                    Vec::new()
+                    CapturedAudio::new(Vec::new(), CaptureEvidence::empty(0))
                 };
 
                 *self.is_recording.lock().unwrap() = false;
@@ -956,7 +1192,7 @@ impl AudioRecordingManager {
 
                 // In on-demand mode, close the mic (lazily if the setting is enabled)
                 if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
-                    if get_settings(&self.app_handle).lazy_stream_close {
+                    if settings.lazy_stream_close {
                         self.schedule_lazy_close();
                     } else {
                         self.stop_microphone_stream();
@@ -969,18 +1205,22 @@ impl AudioRecordingManager {
                 }
 
                 // Pad if very short
-                let s_len = samples.len();
+                let s_len = captured.samples.len();
                 // debug!("Got {} samples", s_len);
                 if s_len < WHISPER_SAMPLE_RATE && s_len > 0 {
-                    let mut padded = samples;
-                    padded.resize(WHISPER_SAMPLE_RATE * 5 / 4, 0.0);
-                    Some(padded)
-                } else {
-                    Some(samples)
+                    captured.samples.resize(WHISPER_SAMPLE_RATE * 5 / 4, 0.0);
                 }
+                Some(captured)
             }
             _ => None,
         }
+    }
+
+    /// Consume the settings snapshot belonging to the just-stopped capture.
+    /// This is deliberately separate from persisted settings: UI edits apply
+    /// to the next shortcut operation, never the one already in flight.
+    pub fn take_session_settings(&self) -> Option<AppSettings> {
+        self.session_settings.lock().unwrap().take()
     }
     pub fn is_recording(&self) -> bool {
         // Lock-free: mirrors the `state` {Recording, Stopping} membership via
@@ -994,8 +1234,18 @@ impl AudioRecordingManager {
     /// Cancel any ongoing recording without returning audio samples
     pub fn cancel_recording(&self) {
         self.invalidate_recording_readiness();
-        self.cancel_generation.fetch_add(1, Ordering::AcqRel);
+        // Upload admission and ESC compete on this CAS first. If upload already
+        // won, generation cancellation below drops/suppresses the in-flight
+        // future; if ESC wins, the request future is never polled.
+        cancel_pending_upload(&self.upload_state);
+        // Cancellation and paste compete on one atomic state. If paste has
+        // already committed, cancellation is too late and must not invalidate
+        // the generation after text has become user-visible.
+        if cancel_pending_side_effect(&self.side_effect_state) {
+            self.cancel_generation.fetch_add(1, Ordering::AcqRel);
+        }
         let mut state = self.state.lock().unwrap();
+        self.session_settings.lock().unwrap().take();
 
         match *state {
             RecordingState::Recording { .. } => {
@@ -1022,5 +1272,72 @@ impl AudioRecordingManager {
             }
             RecordingState::Idle => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod side_effect_tests {
+    use super::{
+        cancel_pending_side_effect, cancel_pending_upload, claim_engine_mutation,
+        claim_pending_operation, claim_pending_paste, claim_pending_upload,
+        finish_pending_operation, release_engine_mutation, SIDE_EFFECT_CANCELLED,
+        SIDE_EFFECT_ENGINE_MUTATING, SIDE_EFFECT_IDLE, SIDE_EFFECT_PASTE_COMMITTED,
+        SIDE_EFFECT_PENDING, UPLOAD_CANCELLED, UPLOAD_READY, UPLOAD_STARTED,
+    };
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    #[test]
+    fn escape_claim_prevents_late_paste() {
+        let state = AtomicU8::new(SIDE_EFFECT_PENDING);
+        assert!(cancel_pending_side_effect(&state));
+        assert!(!claim_pending_paste(&state));
+        assert_eq!(state.load(Ordering::Acquire), SIDE_EFFECT_CANCELLED);
+    }
+
+    #[test]
+    fn committed_paste_rejects_late_escape() {
+        let state = AtomicU8::new(SIDE_EFFECT_PENDING);
+        assert!(claim_pending_paste(&state));
+        assert!(!cancel_pending_side_effect(&state));
+        assert_eq!(state.load(Ordering::Acquire), SIDE_EFFECT_PASTE_COMMITTED);
+    }
+
+    #[test]
+    fn escape_wins_before_upload_admission() {
+        let state = AtomicU8::new(UPLOAD_READY);
+        assert!(cancel_pending_upload(&state));
+        assert!(!claim_pending_upload(&state));
+        assert_eq!(state.load(Ordering::Acquire), UPLOAD_CANCELLED);
+    }
+
+    #[test]
+    fn admitted_upload_is_in_flight_for_late_escape() {
+        let state = AtomicU8::new(UPLOAD_READY);
+        assert!(claim_pending_upload(&state));
+        assert!(!cancel_pending_upload(&state));
+        assert_eq!(state.load(Ordering::Acquire), UPLOAD_STARTED);
+    }
+
+    #[test]
+    fn pending_operation_blocks_local_engine_mutation() {
+        let state = AtomicU8::new(SIDE_EFFECT_IDLE);
+        assert!(claim_pending_operation(&state));
+        assert!(!claim_engine_mutation(&state));
+        assert_eq!(state.load(Ordering::Acquire), SIDE_EFFECT_PENDING);
+    }
+
+    #[test]
+    fn local_engine_mutation_blocks_operation_until_guard_releases() {
+        let state = AtomicU8::new(SIDE_EFFECT_IDLE);
+        assert!(claim_engine_mutation(&state));
+        assert!(!claim_pending_operation(&state));
+        assert_eq!(state.load(Ordering::Acquire), SIDE_EFFECT_ENGINE_MUTATING);
+
+        // A stray operation cleanup cannot steal the engine-mutation reservation.
+        finish_pending_operation(&state);
+        assert_eq!(state.load(Ordering::Acquire), SIDE_EFFECT_ENGINE_MUTATING);
+
+        release_engine_mutation(&state);
+        assert!(claim_pending_operation(&state));
     }
 }

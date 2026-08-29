@@ -1,9 +1,13 @@
-name: "Release"
+name: "Official Handy Release (disabled on forks)"
 
 on: workflow_dispatch
 
 jobs:
   create-release:
+    # Handy Gemini has its own fail-closed signed release workflow. Keeping this
+    # repository-identity gate in the inherited file prevents a manual dispatch
+    # in the fork from creating an unsigned or incorrectly named release.
+    if: github.repository == 'cjpais/Handy'
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -39,6 +43,7 @@ jobs:
             return data.id
 
   publish-tauri:
+    if: github.repository == 'cjpais/Handy'
     permissions:
       contents: write
     needs: create-release

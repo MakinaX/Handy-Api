@@ -9,10 +9,22 @@ import {
   CHINESE_LANGUAGE_CODE,
   getUniqueCapabilityLanguages,
 } from "@/lib/constants/languages";
+import { useSettings } from "@/hooks/useSettings";
+import { GeminiSettings } from "../GeminiSettings";
 
 export const ModelSettingsCard: React.FC = () => {
   const { t } = useTranslation();
   const { currentModel, models } = useModelStore();
+  const { getSetting } = useSettings();
+  const backend = getSetting("transcription_backend") ?? "local";
+
+  if (backend === "gemini") {
+    return (
+      <SettingsGroup title={t("settings.gemini.title")}>
+        <GeminiSettings />
+      </SettingsGroup>
+    );
+  }
 
   const currentModelInfo = models.find((m: ModelInfo) => m.id === currentModel);
 

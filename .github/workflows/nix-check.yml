@@ -35,6 +35,9 @@ concurrency:
 
 jobs:
   nix-build:
+    # Handy Gemini is Windows-only; the inherited official Handy Nix owner is
+    # intentionally inactive in the fork.
+    if: github.repository == 'cjpais/Handy'
     runs-on: ubuntu-24.04
     continue-on-error: false
     steps:

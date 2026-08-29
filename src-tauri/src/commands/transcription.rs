@@ -32,8 +32,10 @@ pub fn get_model_load_status(
 #[tauri::command]
 #[specta::specta]
 pub fn unload_model_manually(
+    app: AppHandle,
     transcription_manager: State<TranscriptionManager>,
 ) -> Result<(), String> {
+    let _engine_mutation_guard = crate::commands::models::reserve_local_engine_mutation(&app)?;
     transcription_manager
         .unload_model()
         .map_err(|e| format!("Failed to unload model: {}", e))

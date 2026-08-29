@@ -15,16 +15,17 @@ use cpal::{
 use crate::audio_toolkit::{
     audio::{AudioVisualiser, FrameResampler},
     constants,
-    vad::{self, VadFrame},
+    vad::{self, VadActivityReport, VadFrame},
     VoiceActivityDetector,
 };
+use crate::speech_guard::{CaptureEvidence, CapturedAudio};
 
 enum Cmd {
     /// Begin capturing. Carries the send timestamp so the consumer can log how
     /// long the command sat in the channel, plus a one-shot acknowledgement
     /// sent only after the first microphone sample chunk is processed.
     Start(VadPolicy, Instant, mpsc::Sender<()>),
-    Stop(mpsc::Sender<Vec<f32>>),
+    Stop(mpsc::Sender<CapturedAudio>),
     Shutdown,
 }
 
@@ -57,12 +58,253 @@ struct VadConfig {
 
 impl VadConfig {
     /// Post-speech hangover tail (in 30 ms frames) for the given policy.
-    /// `Disabled` never reaches the detector, so it maps to the offline value.
+    /// `Disabled` still runs observational VAD and maps to the offline value;
+    /// only its batch-output filtering is bypassed.
     fn hangover_for(&self, policy: VadPolicy) -> usize {
         match policy {
             VadPolicy::Streaming => self.streaming_hangover_frames,
             VadPolicy::Offline | VadPolicy::Disabled => self.offline_hangover_frames,
         }
+    }
+}
+
+/// Per-session statistics accumulated from native-rate mono PCM.  Measurements
+/// happen before resampling, VAD filtering, streaming callbacks, or inference
+/// padding so no later policy can erase the evidence.
+struct CaptureEvidenceAccumulator {
+    raw_sample_rate_hz: u32,
+    raw_sample_count: usize,
+    finite_sample_count: usize,
+    exact_zero_samples: usize,
+    non_finite_samples: usize,
+    peak_amplitude: f32,
+    sum_squares: f64,
+    vad_successful_frames: usize,
+    fallback_vad_voiced_frames: usize,
+    fallback_vad_consecutive_speech_frames: usize,
+    fallback_vad_confirmed_onsets: usize,
+    vad_error_frames: usize,
+}
+
+impl CaptureEvidenceAccumulator {
+    fn new(raw_sample_rate_hz: u32) -> Self {
+        Self {
+            raw_sample_rate_hz,
+            raw_sample_count: 0,
+            finite_sample_count: 0,
+            exact_zero_samples: 0,
+            non_finite_samples: 0,
+            peak_amplitude: 0.0,
+            sum_squares: 0.0,
+            vad_successful_frames: 0,
+            fallback_vad_voiced_frames: 0,
+            fallback_vad_consecutive_speech_frames: 0,
+            fallback_vad_confirmed_onsets: 0,
+            vad_error_frames: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new(self.raw_sample_rate_hz);
+    }
+
+    /// Observe the original values, then replace NaN/Inf with zero before they
+    /// can poison the resampler, VAD, a streaming provider, or a WAV file.
+    fn observe_and_sanitize(&mut self, samples: &mut [f32]) {
+        self.raw_sample_count = self.raw_sample_count.saturating_add(samples.len());
+        for sample in samples {
+            if sample.is_finite() {
+                self.finite_sample_count = self.finite_sample_count.saturating_add(1);
+                if *sample == 0.0 {
+                    self.exact_zero_samples = self.exact_zero_samples.saturating_add(1);
+                }
+                self.peak_amplitude = self.peak_amplitude.max(sample.abs());
+                self.sum_squares += f64::from(*sample) * f64::from(*sample);
+            } else {
+                self.non_finite_samples = self.non_finite_samples.saturating_add(1);
+                *sample = 0.0;
+            }
+        }
+    }
+
+    fn record_vad_success(&mut self, emitted_speech: bool) {
+        self.vad_successful_frames = self.vad_successful_frames.saturating_add(1);
+        self.fallback_vad_voiced_frames = self
+            .fallback_vad_voiced_frames
+            .saturating_add(usize::from(emitted_speech));
+        if emitted_speech {
+            self.fallback_vad_consecutive_speech_frames = self
+                .fallback_vad_consecutive_speech_frames
+                .saturating_add(1);
+            if self.fallback_vad_consecutive_speech_frames == 2 {
+                self.fallback_vad_confirmed_onsets =
+                    self.fallback_vad_confirmed_onsets.saturating_add(1);
+            }
+        } else {
+            self.fallback_vad_consecutive_speech_frames = 0;
+        }
+    }
+
+    fn record_vad_error(&mut self) {
+        self.vad_error_frames = self.vad_error_frames.saturating_add(1);
+    }
+
+    fn snapshot(
+        &self,
+        output_sample_count: usize,
+        activity: Option<VadActivityReport>,
+    ) -> CaptureEvidence {
+        let raw_duration_ms = if self.raw_sample_rate_hz == 0 {
+            0
+        } else {
+            ((self.raw_sample_count as u128 * 1_000) / u128::from(self.raw_sample_rate_hz))
+                .min(u128::from(u64::MAX)) as u64
+        };
+        let rms_amplitude = if self.finite_sample_count == 0 {
+            0.0
+        } else {
+            (self.sum_squares / self.finite_sample_count as f64).sqrt() as f32
+        };
+        let (vad_analyzed_frames, vad_voiced_frames, vad_confirmed_speech_onsets) = activity
+            .map(|report| {
+                (
+                    report.analyzed_frames,
+                    report.voiced_frames,
+                    report.confirmed_speech_onsets,
+                )
+            })
+            .unwrap_or((
+                self.vad_successful_frames,
+                self.fallback_vad_voiced_frames,
+                self.fallback_vad_confirmed_onsets,
+            ));
+
+        CaptureEvidence {
+            raw_sample_count: self.raw_sample_count,
+            raw_sample_rate_hz: self.raw_sample_rate_hz,
+            raw_duration_ms,
+            peak_amplitude: self.peak_amplitude,
+            rms_amplitude,
+            exact_zero_samples: self.exact_zero_samples,
+            non_finite_samples: self.non_finite_samples,
+            output_sample_count,
+            vad_analyzed_frames,
+            vad_voiced_frames,
+            vad_confirmed_speech_onsets,
+            vad_error_frames: self.vad_error_frames,
+        }
+    }
+}
+
+/// Hold live-provider callbacks until the same two-frame VAD onset used by the
+/// recorder confirms speech.  Keep at most one second of leading audio: this is
+/// longer than SmoothedVad's 450 ms prefill while bounding a silent recording's
+/// memory.  Batch output is accumulated separately and is never truncated.
+struct StreamCallbackGate {
+    pending: Vec<f32>,
+    speech_confirmed: bool,
+}
+
+impl StreamCallbackGate {
+    const MAX_PENDING_SAMPLES: usize = constants::WHISPER_SAMPLE_RATE as usize;
+
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            speech_confirmed: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.pending.clear();
+        self.speech_confirmed = false;
+    }
+
+    fn feed(&mut self, samples: &[f32], audio_cb: &Option<AudioFrameCallback>) {
+        let Some(callback) = audio_cb else {
+            return;
+        };
+        if self.speech_confirmed {
+            callback(samples);
+            return;
+        }
+
+        self.pending.extend_from_slice(samples);
+        if self.pending.len() > Self::MAX_PENDING_SAMPLES {
+            let excess = self.pending.len() - Self::MAX_PENDING_SAMPLES;
+            self.pending.drain(..excess);
+        }
+    }
+
+    fn confirm_speech(&mut self, audio_cb: &Option<AudioFrameCallback>) {
+        if self.speech_confirmed {
+            return;
+        }
+        self.speech_confirmed = true;
+        if let Some(callback) = audio_cb {
+            if !self.pending.is_empty() {
+                callback(&self.pending);
+            }
+        }
+        self.pending.clear();
+    }
+}
+
+fn emit_audio_frame(
+    samples: &[f32],
+    audio_cb: &Option<AudioFrameCallback>,
+    stream_gate: &mut StreamCallbackGate,
+    out_buf: &mut Vec<f32>,
+) {
+    out_buf.extend_from_slice(samples);
+    stream_gate.feed(samples, audio_cb);
+}
+
+/// Analyze every 16 kHz frame even when filtering is disabled.  The active
+/// policy controls only what is forwarded, never whether evidence is gathered.
+fn process_frame(
+    samples: &[f32],
+    recording: bool,
+    vad_policy: VadPolicy,
+    vad: &Option<VadConfig>,
+    audio_cb: &Option<AudioFrameCallback>,
+    stream_gate: &mut StreamCallbackGate,
+    out_buf: &mut Vec<f32>,
+    evidence: &mut CaptureEvidenceAccumulator,
+) {
+    if !recording {
+        return;
+    }
+
+    if let Some(cfg) = vad {
+        let mut detector = cfg.detector.lock().unwrap();
+        match detector.push_frame(samples) {
+            Ok(frame) => {
+                let confirmed_speech = frame.is_speech();
+                evidence.record_vad_success(confirmed_speech);
+                match (vad_policy, frame) {
+                    (VadPolicy::Disabled, _) => {
+                        emit_audio_frame(samples, audio_cb, stream_gate, out_buf)
+                    }
+                    (_, VadFrame::Speech(buffer)) => {
+                        emit_audio_frame(buffer, audio_cb, stream_gate, out_buf)
+                    }
+                    (_, VadFrame::Noise) => {}
+                }
+                if confirmed_speech {
+                    stream_gate.confirm_speech(audio_cb);
+                }
+            }
+            Err(error) => {
+                evidence.record_vad_error();
+                // Preserve the existing fail-open audio behavior, but no longer
+                // misreport a detector failure as affirmative voice evidence.
+                log::warn!("VAD frame analysis failed; preserving audio: {error}");
+                emit_audio_frame(samples, audio_cb, stream_gate, out_buf);
+            }
+        }
+    } else {
+        emit_audio_frame(samples, audio_cb, stream_gate, out_buf);
     }
 }
 
@@ -380,7 +622,7 @@ impl AudioRecorder {
         Ok(ready_rx)
     }
 
-    pub fn stop(&self) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    pub fn stop(&self) -> Result<CapturedAudio, Box<dyn std::error::Error>> {
         let (resp_tx, resp_rx) = mpsc::channel();
         if let Some(tx) = &self.cmd_tx {
             tx.send(Cmd::Stop(resp_tx))?;
@@ -603,17 +845,37 @@ pub fn is_no_input_device_error(error_message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_input_block, is_microphone_access_denied, is_no_input_device_error, run_consumer,
-        AudioChunk, AudioRecorder, Cmd,
+        handle_input_block, is_microphone_access_denied, is_no_input_device_error, process_frame,
+        run_consumer, AudioChunk, AudioFrameCallback, AudioRecorder, CaptureEvidenceAccumulator,
+        Cmd, StreamCallbackGate, VadConfig, VadPolicy,
     };
+    use crate::audio_toolkit::vad::{
+        SmoothedVad, VadActivityReport, VadFrame, VoiceActivityDetector,
+    };
+    use anyhow::Result;
+    use std::collections::VecDeque;
     use std::{
         sync::{
             atomic::{AtomicBool, Ordering},
-            mpsc, Arc,
+            mpsc, Arc, Mutex,
         },
         thread,
         time::{Duration, Instant},
     };
+
+    struct ScriptedVad {
+        decisions: VecDeque<bool>,
+    }
+
+    impl VoiceActivityDetector for ScriptedVad {
+        fn push_frame<'a>(&'a mut self, frame: &'a [f32]) -> Result<VadFrame<'a>> {
+            if self.decisions.pop_front().unwrap_or(false) {
+                Ok(VadFrame::Speech(frame))
+            } else {
+                Ok(VadFrame::Noise)
+            }
+        }
+    }
 
     #[test]
     fn unopened_recorder_does_not_need_reopen() {
@@ -693,6 +955,148 @@ mod tests {
     }
 
     #[test]
+    fn disabled_filter_still_collects_raw_vad_evidence() {
+        let smoothed = SmoothedVad::new(
+            Box::new(ScriptedVad {
+                decisions: [true, true].into_iter().collect(),
+            }),
+            3,
+            2,
+            2,
+        );
+        let vad = Some(VadConfig {
+            detector: Arc::new(Mutex::new(Box::new(smoothed))),
+            offline_hangover_frames: 2,
+            streaming_hangover_frames: 4,
+        });
+        let mut accumulator = CaptureEvidenceAccumulator::new(16_000);
+        let mut stream_gate = StreamCallbackGate::new();
+        let mut output = Vec::new();
+        for amplitude in [0.02, 0.03] {
+            let mut frame = vec![amplitude; 480];
+            accumulator.observe_and_sanitize(&mut frame);
+            process_frame(
+                &frame,
+                true,
+                VadPolicy::Disabled,
+                &vad,
+                &None,
+                &mut stream_gate,
+                &mut output,
+                &mut accumulator,
+            );
+        }
+
+        let activity = vad
+            .as_ref()
+            .unwrap()
+            .detector
+            .lock()
+            .unwrap()
+            .activity_report();
+        let evidence = accumulator.snapshot(output.len(), activity);
+        assert_eq!(output.len(), 960, "disabled means unfiltered output");
+        assert_eq!(evidence.vad_analyzed_frames, 2);
+        assert_eq!(evidence.vad_voiced_frames, 2);
+        assert_eq!(evidence.vad_confirmed_speech_onsets, 1);
+        assert_eq!(evidence.vad_error_frames, 0);
+    }
+
+    #[test]
+    fn streaming_callback_is_withheld_until_two_frame_speech_onset() {
+        let smoothed = SmoothedVad::new(
+            Box::new(ScriptedVad {
+                decisions: [false, false, true, true].into_iter().collect(),
+            }),
+            3,
+            2,
+            2,
+        );
+        let vad = Some(VadConfig {
+            detector: Arc::new(Mutex::new(Box::new(smoothed))),
+            offline_hangover_frames: 2,
+            streaming_hangover_frames: 4,
+        });
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let callback: Option<AudioFrameCallback> = Some({
+            let received = Arc::clone(&received);
+            Arc::new(move |samples| {
+                received.lock().unwrap().extend_from_slice(samples);
+            })
+        });
+        let mut accumulator = CaptureEvidenceAccumulator::new(16_000);
+        let mut stream_gate = StreamCallbackGate::new();
+        let mut output = Vec::new();
+
+        for index in 0..4 {
+            let frame = vec![0.02 + index as f32 * 0.01; 480];
+            process_frame(
+                &frame,
+                true,
+                VadPolicy::Disabled,
+                &vad,
+                &callback,
+                &mut stream_gate,
+                &mut output,
+                &mut accumulator,
+            );
+            if index < 3 {
+                assert!(
+                    received.lock().unwrap().is_empty(),
+                    "provider received audio before confirmed speech"
+                );
+            }
+        }
+
+        assert_eq!(output.len(), 4 * 480, "batch output remains unfiltered");
+        assert_eq!(received.lock().unwrap().len(), 4 * 480);
+    }
+
+    #[test]
+    fn missing_vad_withholds_streaming_but_preserves_batch_audio() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let callback: Option<AudioFrameCallback> = Some({
+            let received = Arc::clone(&received);
+            Arc::new(move |samples| {
+                received.lock().unwrap().extend_from_slice(samples);
+            })
+        });
+        let mut accumulator = CaptureEvidenceAccumulator::new(16_000);
+        let mut stream_gate = StreamCallbackGate::new();
+        let mut output = Vec::new();
+        let frame = vec![0.03; 480];
+
+        process_frame(
+            &frame,
+            true,
+            VadPolicy::Streaming,
+            &None,
+            &callback,
+            &mut stream_gate,
+            &mut output,
+            &mut accumulator,
+        );
+
+        assert_eq!(output, frame);
+        assert!(received.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn evidence_counts_and_sanitizes_non_finite_samples() {
+        let mut samples = vec![0.0, 0.25, f32::NAN, f32::INFINITY, -0.5];
+        let mut accumulator = CaptureEvidenceAccumulator::new(1_000);
+        accumulator.observe_and_sanitize(&mut samples);
+        let evidence = accumulator.snapshot(0, Some(VadActivityReport::default()));
+
+        assert_eq!(samples, vec![0.0, 0.25, 0.0, 0.0, -0.5]);
+        assert_eq!(evidence.raw_sample_count, 5);
+        assert_eq!(evidence.non_finite_samples, 2);
+        assert_eq!(evidence.exact_zero_samples, 1);
+        assert_eq!(evidence.peak_amplitude, 0.5);
+        assert_eq!(evidence.raw_duration_ms, 5);
+    }
+
+    #[test]
     fn detects_access_is_denied() {
         assert!(is_microphone_access_denied("Access is denied"));
     }
@@ -749,6 +1153,8 @@ fn run_consumer(
     );
 
     let mut processed_samples = Vec::<f32>::new();
+    let mut evidence = CaptureEvidenceAccumulator::new(in_sample_rate);
+    let mut stream_gate = StreamCallbackGate::new();
     let mut recording = false;
     let mut vad_policy = VadPolicy::Offline;
 
@@ -781,41 +1187,6 @@ fn run_consumer(
         4000.0, // vocal_max_hz
     );
 
-    fn handle_frame(
-        samples: &[f32],
-        recording: bool,
-        vad_policy: VadPolicy,
-        vad: &Option<VadConfig>,
-        audio_cb: &Option<AudioFrameCallback>,
-        out_buf: &mut Vec<f32>,
-    ) {
-        if !recording {
-            return;
-        }
-
-        let mut emit = |buf: &[f32]| {
-            out_buf.extend_from_slice(buf);
-            if let Some(cb) = audio_cb {
-                cb(buf);
-            }
-        };
-
-        if vad_policy == VadPolicy::Disabled {
-            emit(samples);
-            return;
-        }
-
-        if let Some(cfg) = vad {
-            let mut det = cfg.detector.lock().unwrap();
-            match det.push_frame(samples).unwrap_or(VadFrame::Speech(samples)) {
-                VadFrame::Speech(buf) => emit(buf),
-                VadFrame::Noise => {}
-            }
-        } else {
-            emit(samples);
-        }
-    }
-
     // Poll commands even when a disconnected device stops producing samples
     // without closing its CoreAudio stream.
     loop {
@@ -846,18 +1217,17 @@ fn run_consumer(
                     stop_flag.store(false, Ordering::Relaxed);
                     vad_policy = policy;
                     processed_samples.clear();
+                    evidence.reset();
+                    stream_gate.reset();
                     recording = true;
                     visualizer.reset();
                     frame_resampler.reset();
-                    // Reconfigure the single VAD engine for this session's policy
-                    // and clear its smoothing + recurrent state before it sees
-                    // any frames.
-                    if vad_policy != VadPolicy::Disabled {
-                        if let Some(cfg) = &vad {
-                            let mut det = cfg.detector.lock().unwrap();
-                            det.set_hangover_frames(cfg.hangover_for(vad_policy));
-                            det.reset();
-                        }
+                    // Reconfigure and reset even when filtering is disabled:
+                    // VAD remains an observer for provider-independent evidence.
+                    if let Some(cfg) = &vad {
+                        let mut det = cfg.detector.lock().unwrap();
+                        det.set_hangover_frames(cfg.hangover_for(vad_policy));
+                        det.reset();
                     }
                 }
                 Cmd::Stop(reply_tx) => {
@@ -870,15 +1240,18 @@ fn run_consumer(
 
                     // The chunk in hand arrived before the stop; it belongs to
                     // the recording, so feed it ahead of the drain below.
-                    if let Some(AudioChunk::Samples(raw)) = pending.take() {
+                    if let Some(AudioChunk::Samples(mut raw)) = pending.take() {
+                        evidence.observe_and_sanitize(&mut raw);
                         frame_resampler.push(&raw, &mut |frame: &[f32]| {
-                            handle_frame(
+                            process_frame(
                                 frame,
                                 true,
                                 vad_policy,
                                 &vad,
                                 &audio_cb,
+                                &mut stream_gate,
                                 &mut processed_samples,
+                                &mut evidence,
                             )
                         });
                     }
@@ -889,15 +1262,18 @@ fn run_consumer(
                     // ahead of the sentinel.
                     loop {
                         match sample_rx.recv_timeout(Duration::from_secs(2)) {
-                            Ok(AudioChunk::Samples(remaining)) => {
+                            Ok(AudioChunk::Samples(mut remaining)) => {
+                                evidence.observe_and_sanitize(&mut remaining);
                                 frame_resampler.push(&remaining, &mut |frame: &[f32]| {
-                                    handle_frame(
+                                    process_frame(
                                         frame,
                                         true,
                                         vad_policy,
                                         &vad,
                                         &audio_cb,
+                                        &mut stream_gate,
                                         &mut processed_samples,
+                                        &mut evidence,
                                     )
                                 });
                             }
@@ -910,23 +1286,25 @@ fn run_consumer(
                     }
 
                     frame_resampler.finish(&mut |frame: &[f32]| {
-                        handle_frame(
+                        process_frame(
                             frame,
                             true,
                             vad_policy,
                             &vad,
                             &audio_cb,
+                            &mut stream_gate,
                             &mut processed_samples,
+                            &mut evidence,
                         )
                     });
 
                     // Diagnostic only: evidence for whether the VAD was
                     // still withholding tail audio when capture stopped.
                     // Suggestive, not conclusive, in either direction.
-                    if vad_policy != VadPolicy::Disabled {
-                        if let Some(cfg) = &vad {
-                            let report = cfg.detector.lock().unwrap().tail_report();
-                            if let Some(report) = report {
+                    let activity = if let Some(cfg) = &vad {
+                        let detector = cfg.detector.lock().unwrap();
+                        if vad_policy != VadPolicy::Disabled {
+                            if let Some(report) = detector.tail_report() {
                                 log::debug!(
                                     "VAD at stop: withheld tail {} frames (~{}ms, {} voiced), in_speech={}, onset_counter={}, hangover_counter={}",
                                     report.withheld_frames,
@@ -938,9 +1316,17 @@ fn run_consumer(
                                 );
                             }
                         }
-                    }
+                        detector.activity_report()
+                    } else {
+                        None
+                    };
 
-                    let _ = reply_tx.send(std::mem::take(&mut processed_samples));
+                    let capture_evidence = evidence.snapshot(processed_samples.len(), activity);
+                    let captured = CapturedAudio::new(
+                        std::mem::take(&mut processed_samples),
+                        capture_evidence,
+                    );
+                    let _ = reply_tx.send(captured);
 
                     // Resume the audio callback so the consumer loop can continue
                     // receiving chunks (important for always-on microphone mode).
@@ -953,7 +1339,7 @@ fn run_consumer(
             }
         }
 
-        let raw = match pending.take() {
+        let mut raw = match pending.take() {
             Some(AudioChunk::Samples(s)) => s,
             // EndOfStream, or the chunk was consumed by a Stop above.
             _ => continue,
@@ -979,6 +1365,7 @@ fn run_consumer(
         // are reset on Cmd::Start (visualizer.reset() / frame_resampler.reset()),
         // so they resume cleanly the moment recording begins.
         if recording {
+            evidence.observe_and_sanitize(&mut raw);
             if let Some(buckets) = visualizer.feed(&raw) {
                 if let Some(cb) = &level_cb {
                     cb(buckets);
@@ -986,13 +1373,15 @@ fn run_consumer(
             }
 
             frame_resampler.push(&raw, &mut |frame: &[f32]| {
-                handle_frame(
+                process_frame(
                     frame,
                     recording,
                     vad_policy,
                     &vad,
                     &audio_cb,
+                    &mut stream_gate,
                     &mut processed_samples,
+                    &mut evidence,
                 )
             });
         }

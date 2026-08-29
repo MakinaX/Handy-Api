@@ -8,6 +8,8 @@ mod catalog;
 pub mod cli;
 mod clipboard;
 mod commands;
+mod gemini;
+mod gemini_key;
 mod helpers;
 mod input;
 mod llm_client;
@@ -20,6 +22,7 @@ mod secure_input;
 mod settings;
 mod shortcut;
 mod signal_handle;
+mod speech_guard;
 mod transcription_coordinator;
 mod tray;
 mod tray_i18n;
@@ -275,6 +278,20 @@ fn initialize_core_logic(app_handle: &AppHandle) {
                     log::warn!("No model is currently loaded.");
                     return;
                 }
+                let _engine_mutation_guard =
+                    match commands::models::reserve_local_engine_mutation(app) {
+                        Ok(guard) => guard,
+                        Err(error) => {
+                            log::warn!("Model unload rejected: {error}");
+                            return;
+                        }
+                    };
+                // Re-check after acquiring the reservation; another serialized
+                // mutation may have unloaded it after the optimistic UI check.
+                if !transcription_manager.is_model_loaded() {
+                    log::warn!("No model is currently loaded.");
+                    return;
+                }
                 match transcription_manager.unload_model() {
                     Ok(()) => log::info!("Model unloaded via tray."),
                     Err(e) => log::error!("Failed to unload model via tray: {}", e),
@@ -289,17 +306,49 @@ fn initialize_core_logic(app_handle: &AppHandle) {
             "quit" => {
                 app.exit(0);
             }
+            "backend_select:gemini" => {
+                let current = settings::get_settings(app);
+                if current.transcription_backend != settings::TranscriptionBackend::Gemini {
+                    match commands::gemini::persist_transcription_backend(
+                        app,
+                        settings::TranscriptionBackend::Gemini,
+                    ) {
+                        Ok(()) => log::info!("Gemini transcription backend selected via tray."),
+                        Err(error) => {
+                            log::error!("Failed to select Gemini backend via tray: {error}")
+                        }
+                    }
+                }
+            }
             id if id.starts_with("model_select:") => {
                 let model_id = id.strip_prefix("model_select:").unwrap().to_string();
-                let current_model = settings::get_settings(app).selected_model;
-                if model_id == current_model {
+                let current = settings::get_settings(app);
+                if model_id == current.selected_model {
+                    if current.transcription_backend != settings::TranscriptionBackend::Local {
+                        if let Err(error) = commands::gemini::persist_transcription_backend(
+                            app,
+                            settings::TranscriptionBackend::Local,
+                        ) {
+                            log::error!("Failed to select local backend via tray: {error}");
+                        }
+                    }
                     return;
                 }
                 let app_clone = app.clone();
                 std::thread::spawn(move || {
                     match commands::models::switch_active_model(&app_clone, &model_id) {
                         Ok(()) => {
-                            log::info!("Model switched to {} via tray.", model_id);
+                            match commands::gemini::persist_transcription_backend(
+                                &app_clone,
+                                settings::TranscriptionBackend::Local,
+                            ) {
+                                Ok(()) => {
+                                    log::info!("Model switched to {} via tray.", model_id)
+                                }
+                                Err(error) => log::error!(
+                                    "Model switched but local backend selection failed: {error}"
+                                ),
+                            }
                         }
                         Err(e) => {
                             log::error!("Failed to switch model via tray: {}", e);
@@ -506,6 +555,11 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
         eprintln!("error: no model selected (pass --model or pick one in the app)");
         return 2;
     }
+    // The strict engine/snapshot invariant also applies to explicit CLI model
+    // overrides. Preserve every other persisted option while binding this run
+    // to the model that was actually requested and loaded.
+    let mut transcription_settings = get_settings(app);
+    transcription_settings.selected_model = model_id.clone();
 
     // --device-index hard-selects a compute device by its --list-devices registry
     // index (transcribe-cpp / whisper-family models only; not persisted). Omit it
@@ -539,7 +593,7 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
             }
         }
         let t = Instant::now();
-        match tm.transcribe(samples.clone()) {
+        match tm.transcribe_with_settings(samples.clone(), &transcription_settings) {
             Ok(out) => text = out,
             Err(e) => {
                 eprintln!("error: transcribe failed: {}", e);
@@ -682,6 +736,13 @@ pub fn run(cli_args: CliArgs) {
             commands::get_app_dir_path,
             commands::get_app_settings,
             commands::get_default_settings,
+            commands::gemini::change_transcription_backend_setting,
+            commands::gemini::change_gemini_transcription_mode_setting,
+            commands::gemini::change_gemini_language_setting,
+            commands::gemini::gemini_api_key_status,
+            commands::gemini::save_gemini_api_key,
+            commands::gemini::test_gemini_connection,
+            commands::gemini::test_gemini_api_key,
             commands::get_log_dir_path,
             commands::set_log_level,
             commands::open_recordings_folder,
@@ -778,11 +839,11 @@ pub fn run(cli_args: CliArgs) {
                     Target::new(if let Some(data_dir) = portable::data_dir() {
                         TargetKind::Folder {
                             path: data_dir.join("logs"),
-                            file_name: Some("handy".into()),
+                            file_name: Some("handy-gemini".into()),
                         }
                     } else {
                         TargetKind::LogDir {
-                            file_name: Some("handy".into()),
+                            file_name: Some("handy-gemini".into()),
                         }
                     })
                     .filter(|metadata| {
@@ -898,7 +959,7 @@ pub fn run(cli_args: CliArgs) {
             // for portable mode (redirects WebView2 cache to portable Data dir)
             let mut win_builder =
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("/".into()))
-                    .title("Handy")
+                    .title("Handy Gemini")
                     .inner_size(680.0, 570.0)
                     .min_inner_size(680.0, 570.0)
                     .resizable(true)

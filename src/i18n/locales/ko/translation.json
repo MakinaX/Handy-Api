@@ -5,6 +5,7 @@
     "copyLastTranscript": "마지막 녹음 내용 복사",
     "unloadModel": "모델 언로드",
     "model": "모델",
+    "geminiTranscribeCloud": "Gemini Transcribe (클라우드)",
     "quit": "종료",
     "cancel": "취소",
     "secureInputWarning": "⚠ Secure Input으로 단축키가 차단됨"
@@ -121,6 +122,12 @@
     }
   },
   "modelSelector": {
+    "cloud": "클라우드",
+    "gemini": {
+      "name": "Gemini Transcribe",
+      "description": "Smart 및 Verbatim 모드를 지원하는 클라우드 음성 인식",
+      "configureKey": "Gemini API 키 설정 필요"
+    },
     "custom": "사용자 정의",
     "streaming": "스트리밍",
     "active": "활성",
@@ -155,6 +162,38 @@
     "legacy": "레거시"
   },
   "settings": {
+    "gemini": {
+      "title": "Gemini Transcribe (Cloud)",
+      "apiKey": {
+        "title": "API 키",
+        "description": "Windows 자격 증명 관리자에 안전하게 저장되며 다시 표시되지 않습니다.",
+        "placeholder": "Gemini API 키 입력",
+        "configured": "API 키 설정됨",
+        "save": "저장",
+        "saving": "저장 중...",
+        "saved": "Gemini API 키를 저장했습니다",
+        "saveError": "Gemini API 키를 저장하지 못했습니다"
+      },
+      "connection": {
+        "test": "연결 테스트",
+        "testing": "테스트 중...",
+        "success": "Gemini 연결에 성공했습니다",
+        "error": "Gemini 연결에 실패했습니다"
+      },
+      "mode": {
+        "title": "모드",
+        "description": "Smart는 서식을 개선하고 Verbatim은 말한 형태를 그대로 보존합니다.",
+        "smart": "Smart",
+        "verbatim": "Verbatim"
+      },
+      "language": {
+        "title": "언어",
+        "description": "자동 모드는 한국어와 영어 코드 스위칭을 지원합니다.",
+        "auto": "자동",
+        "korean": "한국어",
+        "english": "영어"
+      }
+    },
     "modelSettings": {
       "title": "{{model}} 설정"
     },

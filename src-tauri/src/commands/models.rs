@@ -1,9 +1,31 @@
+use crate::managers::audio::{AudioRecordingManager, LocalEngineMutationGuard};
 use crate::managers::model::{ModelInfo, ModelManager};
 use crate::managers::transcription::{ModelStateEvent, TranscriptionManager};
 use crate::settings::{get_settings, write_settings, ModelUnloadTimeout};
 use log::error;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+/// Atomically reserve the local engine against transcription arming. Every
+/// user/background path that switches, unloads, or deletes the active engine
+/// must hold this guard for the complete mutation.
+pub(crate) fn reserve_local_engine_mutation(
+    app: &AppHandle,
+) -> Result<LocalEngineMutationGuard, String> {
+    app.state::<Arc<AudioRecordingManager>>()
+        .try_start_local_engine_mutation()
+        .ok_or_else(|| {
+            "Cannot change the local model while a transcription operation or another model change is active"
+                .to_string()
+        })
+}
+
+fn should_unload_before_deferred_switch(
+    unload_timeout: ModelUnloadTimeout,
+    model_is_loaded: bool,
+) -> bool {
+    unload_timeout == ModelUnloadTimeout::Immediately && model_is_loaded
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -69,6 +91,11 @@ pub async fn delete_model(
     transcription_manager: State<'_, Arc<TranscriptionManager>>,
     model_id: String,
 ) -> Result<(), String> {
+    // Deleting any local model is serialized with operation arming. The active
+    // model path below also unloads the engine; inactive deletion remains short
+    // and avoids a settings race with a simultaneous switch.
+    let _engine_mutation_guard = reserve_local_engine_mutation(&app_handle)?;
+
     // If deleting the active model, unload it and clear the setting
     let settings = get_settings(&app_handle);
     if settings.selected_model == model_id {
@@ -95,6 +122,12 @@ pub async fn delete_model(
 pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String> {
     let model_manager = app.state::<Arc<ModelManager>>();
     let transcription_manager = app.state::<Arc<TranscriptionManager>>();
+
+    // Share one atomic reservation with transcription arming. This rejects a
+    // switch throughout recording and provider/output processing, and also
+    // prevents a new operation from starting while the engine is being
+    // replaced.
+    let _engine_mutation_guard = reserve_local_engine_mutation(app)?;
 
     // Atomically claim the loading slot — prevents concurrent model loads
     // from tray double-clicks or overlapping commands. The guard resets the
@@ -125,9 +158,25 @@ pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String
 
     write_settings(app, settings);
 
-    // Skip eager loading if unload is set to "Immediately" — the model
-    // will be loaded on-demand during the next transcription.
+    // Skip eager loading if unload is set to "Immediately" — but first remove
+    // any old engine. Leaving model A resident while persisting selection B
+    // would let the next operation incorrectly reuse A.
     if unload_timeout == ModelUnloadTimeout::Immediately {
+        if should_unload_before_deferred_switch(
+            unload_timeout,
+            transcription_manager.is_model_loaded(),
+        ) {
+            if let Err(error) = transcription_manager.unload_model() {
+                let mut settings = get_settings(app);
+                settings.selected_model = old_model;
+                settings.onboarding_completed = old_onboarding_completed;
+                write_settings(app, settings);
+                return Err(format!(
+                    "Failed to unload the previous model before deferring the switch: {error}"
+                ));
+            }
+        }
+
         // Notify frontend — load_model won't be called so no events
         // would otherwise be emitted.
         let _ = app.emit(
@@ -203,4 +252,26 @@ pub async fn cancel_download(
     model_manager
         .cancel_download(&model_id)
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_unload_before_deferred_switch;
+    use crate::settings::ModelUnloadTimeout;
+
+    #[test]
+    fn immediate_switch_unloads_a_resident_previous_model() {
+        assert!(should_unload_before_deferred_switch(
+            ModelUnloadTimeout::Immediately,
+            true
+        ));
+        assert!(!should_unload_before_deferred_switch(
+            ModelUnloadTimeout::Immediately,
+            false
+        ));
+        assert!(!should_unload_before_deferred_switch(
+            ModelUnloadTimeout::Never,
+            true
+        ));
+    }
 }

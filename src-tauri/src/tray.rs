@@ -51,6 +51,10 @@ impl TrayIconState {
     }
 }
 
+fn local_engine_controls_enabled(busy: bool, model_loaded: bool) -> bool {
+    !busy && model_loaded
+}
+
 /// Everything the tray *menu* (and tooltip) depends on. When two snapshots
 /// compare equal the menu is not rebuilt.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +62,7 @@ struct MenuInputs {
     busy: bool,
     warning: bool,
     model_loaded: bool,
+    transcription_backend: settings::TranscriptionBackend,
     selected_model: String,
     /// `(id, name)` of downloaded models, sorted by name.
     downloaded_models: Vec<(String, String)>,
@@ -330,6 +335,7 @@ fn compute_desired(app: &AppHandle, icon_state: TrayIconState) -> TrayDesired {
             busy: icon_state.is_busy(),
             warning,
             model_loaded,
+            transcription_backend: settings.transcription_backend,
             selected_model: settings.selected_model,
             downloaded_models,
             locale: settings.app_language,
@@ -445,9 +451,9 @@ pub fn tray_tooltip() -> String {
 
 fn version_label() -> String {
     if cfg!(debug_assertions) {
-        format!("Handy v{} (Dev)", env!("CARGO_PKG_VERSION"))
+        format!("Handy Gemini v{} (Dev)", env!("CARGO_PKG_VERSION"))
     } else {
-        format!("Handy v{}", env!("CARGO_PKG_VERSION"))
+        format!("Handy Gemini v{}", env!("CARGO_PKG_VERSION"))
     }
 }
 
@@ -529,16 +535,32 @@ fn build_menu(app: &AppHandle, inputs: &MenuInputs) -> tauri::Result<(Menu<tauri
         )?
     } else {
         // Build model submenu — label is the active model name
-        let submenu_label = inputs
-            .downloaded_models
-            .iter()
-            .find(|(id, _)| *id == inputs.selected_model)
-            .map(|(_, name)| name.clone())
-            .unwrap_or_else(|| strings.model.clone());
+        let submenu_label =
+            if inputs.transcription_backend == settings::TranscriptionBackend::Gemini {
+                strings.gemini_transcribe_cloud.clone()
+            } else {
+                inputs
+                    .downloaded_models
+                    .iter()
+                    .find(|(id, _)| *id == inputs.selected_model)
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| strings.model.clone())
+            };
 
         let model_submenu = Submenu::with_id(app, "model_submenu", &submenu_label, true)?;
+        let gemini_item = CheckMenuItem::with_id(
+            app,
+            "backend_select:gemini",
+            &strings.gemini_transcribe_cloud,
+            true,
+            inputs.transcription_backend == settings::TranscriptionBackend::Gemini,
+            None::<&str>,
+        )?;
+        model_submenu.append(&gemini_item)?;
+        model_submenu.append(&PredefinedMenuItem::separator(app)?)?;
         for (id, name) in &inputs.downloaded_models {
-            let is_active = *id == inputs.selected_model;
+            let is_active = inputs.transcription_backend == settings::TranscriptionBackend::Local
+                && *id == inputs.selected_model;
             let item_id = format!("model_select:{}", id);
             let item = CheckMenuItem::with_id(app, &item_id, name, true, is_active, None::<&str>)?;
             model_submenu.append(&item)?;
@@ -548,7 +570,7 @@ fn build_menu(app: &AppHandle, inputs: &MenuInputs) -> tauri::Result<(Menu<tauri
             app,
             "unload_model",
             &strings.unload_model,
-            inputs.model_loaded,
+            local_engine_controls_enabled(inputs.busy, inputs.model_loaded),
             None::<&str>,
         )?;
 
@@ -656,8 +678,11 @@ pub fn copy_last_transcript(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{last_transcript_text, load_tray_icon, MenuInputs, TrayDesired, TrayIconState};
-    use crate::managers::history::HistoryEntry;
+    use super::{
+        last_transcript_text, load_tray_icon, local_engine_controls_enabled, MenuInputs,
+        TrayDesired, TrayIconState,
+    };
+    use crate::{managers::history::HistoryEntry, settings::TranscriptionBackend};
 
     fn build_entry(transcription: &str, post_processed: Option<&str>) -> HistoryEntry {
         HistoryEntry {
@@ -678,6 +703,7 @@ mod tests {
             busy,
             warning: false,
             model_loaded: true,
+            transcription_backend: TranscriptionBackend::Local,
             selected_model: "small".to_string(),
             downloaded_models: vec![("small".to_string(), "Small".to_string())],
             locale: "en".to_string(),
@@ -695,6 +721,13 @@ mod tests {
     fn falls_back_to_raw_transcription() {
         let entry = build_entry("raw", None);
         assert_eq!(last_transcript_text(&entry), "raw");
+    }
+
+    #[test]
+    fn local_engine_controls_are_disabled_while_pipeline_is_busy() {
+        assert!(local_engine_controls_enabled(false, true));
+        assert!(!local_engine_controls_enabled(true, true));
+        assert!(!local_engine_controls_enabled(false, false));
     }
 
     #[test]

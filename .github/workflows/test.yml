@@ -15,6 +15,8 @@ concurrency:
 
 jobs:
   rust-tests:
+    # Replaced in Handy Gemini by handy-gemini-ci.yml.
+    if: github.repository == 'cjpais/Handy'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5

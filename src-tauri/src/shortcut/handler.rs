@@ -4,11 +4,9 @@
 //! used by both the Tauri and handy-keys implementations.
 
 use log::warn;
-use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
 use crate::actions::ACTION_MAP;
-use crate::managers::audio::AudioRecordingManager;
 use crate::settings::get_settings;
 use crate::transcription_coordinator::is_transcribe_binding;
 use crate::TranscriptionCoordinator;
@@ -52,10 +50,11 @@ pub fn handle_shortcut_event(
         return;
     };
 
-    // Cancel binding: only fires when recording and key is pressed
+    // The cancel binding is registered only for the lifetime of an active
+    // recording/output transaction. Do not narrow this to `is_recording()`:
+    // Escape must also cancel pending local/Gemini transcription and paste.
     if binding_id == "cancel" {
-        let audio_manager = app.state::<Arc<AudioRecordingManager>>();
-        if audio_manager.is_recording() && is_pressed {
+        if is_pressed {
             action.start(app, binding_id, hotkey_string);
         }
         return;
