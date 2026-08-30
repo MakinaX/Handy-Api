@@ -384,21 +384,42 @@ jobs:
           if (-not (Test-Path $bundle)) {
             throw "Target-specific NSIS bundle directory is missing: $bundle"
           }
+          # Tauri names the raw NSIS file from productName and therefore keeps
+          # the space in "Handy API". Require that exact single build output,
+          # then canonicalize only its filename for the stable release URL.
+          $generatedName = "Handy API_$($env:FORK_VERSION)_x64-setup.exe"
           $expectedName = "Handy.API_$($env:FORK_VERSION)_x64-setup.exe"
           $expectedPath = Join-Path $bundle $expectedName
-          $foreignInstallers = @(
-            Get-ChildItem $bundle -File -Filter "*-setup.exe" |
-              Where-Object Name -CNE $expectedName
-          )
-          if ($foreignInstallers.Count -ne 0) {
-            throw "Foreign NSIS setup artifact found: $($foreignInstallers.Name -join ', ')"
+          $generatedInstallers = @(Get-ChildItem $bundle -File -Filter "*-setup.exe")
+          if ($generatedInstallers.Count -ne 1 -or
+              $generatedInstallers[0].Name -cne $generatedName) {
+            throw "Tauri must emit exactly one expected raw NSIS installer: $generatedName"
           }
-          if (-not (Test-Path $expectedPath -PathType Leaf)) {
-            throw "Exact NSIS setup artifact is missing: $expectedName"
+          $generatedInstaller = $generatedInstallers[0]
+          if (($generatedInstaller.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Raw NSIS installer must not be a reparse point"
           }
-          $installer = Get-Item $expectedPath
           if (Get-ChildItem $bundle -File -Filter "*.sig") {
             throw "Unsigned build unexpectedly emitted an updater signature"
+          }
+          if (Test-Path $expectedPath) {
+            throw "Canonical NSIS destination already exists: $expectedName"
+          }
+          $generatedHash = (Get-FileHash -LiteralPath $generatedInstaller.FullName `
+            -Algorithm SHA256).Hash
+          Move-Item -LiteralPath $generatedInstaller.FullName -Destination $expectedPath
+
+          $canonicalInstallers = @(Get-ChildItem $bundle -File -Filter "*-setup.exe")
+          if ($canonicalInstallers.Count -ne 1 -or
+              $canonicalInstallers[0].Name -cne $expectedName -or
+              -not (Test-Path $expectedPath -PathType Leaf)) {
+            throw "Canonicalization must leave only the exact NSIS installer: $expectedName"
+          }
+          $installer = Get-Item -LiteralPath $expectedPath
+          $canonicalHash = (Get-FileHash -LiteralPath $installer.FullName `
+            -Algorithm SHA256).Hash
+          if ($canonicalHash -cne $generatedHash) {
+            throw "Canonical NSIS rename changed installer bytes"
           }
 
           # Exercise the shipped package, not the unbundled build output. This
@@ -447,9 +468,19 @@ jobs:
             }
           }
 
+          $postSmokeHash = (Get-FileHash -LiteralPath $installer.FullName `
+            -Algorithm SHA256).Hash
+          if ($postSmokeHash -cne $generatedHash) {
+            throw "Runtime smoke changed installer bytes"
+          }
           New-Item -ItemType Directory -Path unsigned-assets -Force | Out-Null
-          Copy-Item $installer.FullName unsigned-assets/
-          Get-FileHash $installer.FullName -Algorithm SHA256 | Format-List
+          $stagedPath = Join-Path "unsigned-assets" $expectedName
+          Copy-Item -LiteralPath $installer.FullName -Destination $stagedPath
+          $stagedHash = (Get-FileHash -LiteralPath $stagedPath -Algorithm SHA256).Hash
+          if ($stagedHash -cne $generatedHash) {
+            throw "Staged unsigned installer bytes do not match the verified build"
+          }
+          Get-FileHash -LiteralPath $stagedPath -Algorithm SHA256 | Format-List
 
       - name: Upload exact unsigned signing input
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

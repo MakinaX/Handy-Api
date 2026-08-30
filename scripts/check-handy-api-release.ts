@@ -813,6 +813,101 @@ for (const releaseInvariant of [
     `upstream-sync release invariant is missing: ${releaseInvariant}`,
   );
 }
+const unsignedVerificationStepStart = upstreamSync.indexOf(
+  "- name: Verify exact unsigned updater output and runtime",
+);
+const unsignedUploadStepStart = upstreamSync.indexOf(
+  "- name: Upload exact unsigned signing input",
+  unsignedVerificationStepStart,
+);
+expect(
+  unsignedVerificationStepStart >= 0 &&
+    unsignedUploadStepStart > unsignedVerificationStepStart,
+  "unsigned installer verification step boundaries are missing",
+);
+const unsignedVerificationStep = upstreamSync.slice(
+  unsignedVerificationStepStart,
+  unsignedUploadStepStart,
+);
+for (const unsignedInvariant of [
+  '$generatedName = "Handy API_$($env:FORK_VERSION)_x64-setup.exe"',
+  '$expectedName = "Handy.API_$($env:FORK_VERSION)_x64-setup.exe"',
+  "$generatedInstallers.Count -ne 1",
+  "$generatedInstallers[0].Name -cne $generatedName",
+  "[IO.FileAttributes]::ReparsePoint",
+  'Get-ChildItem $bundle -File -Filter "*.sig"',
+  "if (Test-Path $expectedPath)",
+  "Get-FileHash -LiteralPath $generatedInstaller.FullName",
+  "Move-Item -LiteralPath $generatedInstaller.FullName -Destination $expectedPath",
+  "$canonicalInstallers.Count -ne 1",
+  "$canonicalInstallers[0].Name -cne $expectedName",
+  "-not (Test-Path $expectedPath -PathType Leaf)",
+  "$installer = Get-Item -LiteralPath $expectedPath",
+  "$canonicalHash -cne $generatedHash",
+  "$postSmokeHash -cne $generatedHash",
+  "Copy-Item -LiteralPath $installer.FullName -Destination $stagedPath",
+  "$stagedHash -cne $generatedHash",
+]) {
+  expect(
+    unsignedVerificationStep.includes(unsignedInvariant),
+    `unsigned installer verification invariant is missing: ${unsignedInvariant}`,
+  );
+}
+const rawInstallerCheck = unsignedVerificationStep.indexOf(
+  '$generatedName = "Handy API_$($env:FORK_VERSION)_x64-setup.exe"',
+);
+const rawExactNameCheck = unsignedVerificationStep.indexOf(
+  "$generatedInstallers[0].Name -cne $generatedName",
+);
+const unsignedSignatureCheck = unsignedVerificationStep.indexOf(
+  'Get-ChildItem $bundle -File -Filter "*.sig"',
+);
+const destinationCollisionCheck = unsignedVerificationStep.indexOf(
+  "if (Test-Path $expectedPath)",
+);
+const rawByteHash = unsignedVerificationStep.indexOf(
+  "Get-FileHash -LiteralPath $generatedInstaller.FullName",
+);
+const canonicalRename = unsignedVerificationStep.indexOf(
+  "Move-Item -LiteralPath $generatedInstaller.FullName -Destination $expectedPath",
+);
+const canonicalEnumeration = unsignedVerificationStep.indexOf(
+  "$canonicalInstallers = @(",
+);
+const canonicalExactNameCheck = unsignedVerificationStep.indexOf(
+  "$canonicalInstallers[0].Name -cne $expectedName",
+);
+const canonicalByteCheck = unsignedVerificationStep.indexOf(
+  "$canonicalHash -cne $generatedHash",
+);
+const installedRuntimeSmoke = unsignedVerificationStep.indexOf(
+  "$install = Start-Process -FilePath $installer.FullName",
+);
+const postSmokeByteCheck = unsignedVerificationStep.indexOf(
+  "$postSmokeHash -cne $generatedHash",
+);
+const stagedCopy = unsignedVerificationStep.indexOf(
+  "Copy-Item -LiteralPath $installer.FullName -Destination $stagedPath",
+);
+const stagedByteCheck = unsignedVerificationStep.indexOf(
+  "$stagedHash -cne $generatedHash",
+);
+expect(
+  rawInstallerCheck >= 0 &&
+    rawExactNameCheck > rawInstallerCheck &&
+    unsignedSignatureCheck > rawExactNameCheck &&
+    destinationCollisionCheck > unsignedSignatureCheck &&
+    rawByteHash > destinationCollisionCheck &&
+    canonicalRename > rawByteHash &&
+    canonicalEnumeration > canonicalRename &&
+    canonicalExactNameCheck > canonicalEnumeration &&
+    canonicalByteCheck > canonicalExactNameCheck &&
+    installedRuntimeSmoke > canonicalByteCheck &&
+    postSmokeByteCheck > installedRuntimeSmoke &&
+    stagedCopy > postSmokeByteCheck &&
+    stagedByteCheck > stagedCopy,
+  "unsigned installer canonicalization and byte checks are out of order",
+);
 for (const ciInvariant of [
   "bun install --frozen-lockfile",
   "bunx prettier --check .",

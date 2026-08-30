@@ -8,9 +8,12 @@ dedicated private-key environment configuration and the two approvals described
 below. The inherited official Handy release and main-build workflows are
 repository-identity gated and cannot publish from this fork.
 
-This document describes the next authorized closure phase. During the current
-identity-only phase, do **not** run its push, GitHub API mutation, secret
-registration, environment-creation, or public-key configuration commands.
+This document describes the authorized closure sequence. The identity-only
+phase, public-key binding, protected-environment setup, environment-scoped
+secret registration, and initial push are complete. Treat the corresponding
+commands below as recovery/read-back instructions: do not regenerate the
+keypair or repeat secret mutations without a new, specific authorization. The
+current closure attempt must stop before approving `handy-api-signing`.
 
 ## 1. Verify authentication and the safe remote layout
 
@@ -37,9 +40,9 @@ The identity read-back must be `MakinaX`; the repository read-back must report
 that only `origin` can push and that official `cjpais/Handy` remains the
 fetch-only `upstream`.
 
-The initial push is intentionally pending. Do not run it during the identity-only
-phase. When the Director separately authorizes publication setup, the exact
-command is:
+The initial push completed with implementation/trust-root commit
+`788809ce3cd99c0c29c77fbf832aeba1dfc4d7c2`. For a later locally validated
+closure commit, the exact guarded push command remains:
 
 ```bash
 git push --set-upstream origin HEAD:main
@@ -294,7 +297,10 @@ The sync workflow enforces this order before publication:
 1. exact stable upstream tag merge into a candidate branch;
 2. frontend, format, lint, Playwright, Clippy, Rust, and Nix package gates;
 3. unsigned exact Windows x64 NSIS build and installed-package runtime smoke,
-   with no signing secrets in the candidate job;
+   with no signing secrets in the candidate job; the job first requires the
+   exact Tauri raw filename `Handy API_<version>_x64-setup.exe`, then renames
+   that unchanged byte stream to the canonical public filename
+   `Handy.API_<version>_x64-setup.exe` before smoke and upload;
 4. Director approval of the independent `handy-api-signing` environment;
 5. no-checkout Tauri CLI 2.11.4 signing of only
    `Handy.API_<version>_x64-setup.exe`, followed by secret-free Minisign

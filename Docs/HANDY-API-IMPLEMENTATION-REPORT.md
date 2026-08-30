@@ -10,17 +10,20 @@ Baseline tag/commit: `v0.9.6` / `af48dd68a64d58aad128fdbb920492a03da53c79`
 
 The local implementation and release scaffolding are substantially complete,
 but this checkout does **not** yet satisfy the brief's final completion
-standard. A Windows artifact has not been built, and the live Gemini, physical
-microphone, cursor-paste, Credential Manager, installer-isolation, and updater
-paths have not been exercised on Windows.
+standard. The first live closure run built an unsigned Windows NSIS installer,
+but verification stopped before install smoke and artifact upload. Therefore no
+verified Windows candidate exists, and the live Gemini, physical microphone,
+cursor-paste, Credential Manager, installer-isolation, and updater paths have
+not been exercised on Windows.
 
 The product and repository identity is now `Handy API` / `MakinaX/Handy-Api`.
 The Director reports that GitHub authentication and a dedicated updater
 keypair already exist on the trusted Windows machine. The updater public key is
 now bound to the fork and the strict release contract passes. The private key
 and password were not read or printed. The environment-level secrets and both
-protected approval environments are configured; signing remains fail-closed at
-the unapproved `handy-api-signing` environment gate. The exact procedure is in
+protected approval environments are configured. The failed run never reached a
+pending deployment; a successful candidate must stop at the still-unapproved
+`handy-api-signing` environment gate. The exact procedure is in
 `Docs/HANDY-API-ONE-TIME-SETUP.md`.
 
 ## Fresh baseline and adopted upstream work
@@ -160,7 +163,7 @@ results for the committed Handy API tree.
 | Live Gemini acceptance corpus                   | NOT EXECUTED         | Gemini API key is unavailable                                         |
 | Windows F1/ESC/paste/history/manual matrix      | NOT EXECUTED         | no Windows runtime/runner in the local environment                    |
 | Windows migration/Credential Manager            | NOT EXECUTED         | Windows app-data and credential APIs unavailable locally              |
-| Windows installer/runtime/update retention      | NOT EXECUTED         | no unsigned candidate or physical Windows acceptance run exists       |
+| Windows installer/runtime/update retention      | NOT EXECUTED         | no verified/uploaded candidate or physical Windows acceptance exists  |
 
 ## Current Handy API tree verification
 
@@ -198,6 +201,27 @@ copyfile backend, then produced the exact `handy-api` executable. Tauri emitted
 a Linux DEB bundle-type marker warning; no Linux or Windows updater acceptance
 is inferred from this package-build result.
 
+## First live closure run
+
+- Initial push CI run
+  [`33302015844`](https://github.com/MakinaX/Handy-Api/actions/runs/33302015844)
+  passed frontend/contracts, Rust, and the actual Nix package build on exact
+  commit `788809ce3cd99c0c29c77fbf832aeba1dfc4d7c2`.
+- Upstream-sync run
+  [`33303353021`](https://github.com/MakinaX/Handy-Api/actions/runs/33303353021)
+  passed candidate preparation, all candidate CI gates, the strict release
+  contract, and the unsigned NSIS build. It then failed closed before install
+  smoke and upload because Tauri emitted the raw product-derived filename
+  `Handy API_0.9.6-api.1_x64-setup.exe`, while the release contract requires
+  `Handy.API_0.9.6-api.1_x64-setup.exe`.
+- That failed run produced zero Actions artifacts, did not expose signing
+  secrets, skipped both signing and production jobs, and created no tag or
+  release. The workflow now requires exactly the single raw Tauri filename and
+  canonicalizes only that file to the stable release filename before runtime
+  smoke and upload.
+- Windows acceptance remains **NOT EXECUTED**. A fresh full run is required;
+  the failed run is retained only as fail-closed diagnostic evidence.
+
 ## External capability state
 
 - GitHub authentication and repository authority: **DIRECTOR-PROVIDED
@@ -206,7 +230,9 @@ is inferred from this package-build result.
   checkout.
 - GitHub Actions default token permissions: **DIRECTOR-PROVIDED READ-BACK
   PASS** (`write`, with pull-request review approval disabled).
-- Repository target: `MakinaX/Handy-Api`; the initial push has not been made.
+- Repository target: `MakinaX/Handy-Api`; the initial push completed with
+  implementation/trust-root commit
+  `788809ce3cd99c0c29c77fbf832aeba1dfc4d7c2` on `main`.
 - Official `cjpais/Handy`: retained as fetch-only `upstream` with push disabled.
 - Dedicated Handy API updater keypair: **DIRECTOR-REPORTED CREATED** outside the
   repository. The Director reports that SHA-256 receipts for the original and
@@ -229,11 +255,13 @@ No credential values were read, logged, or added to the repository.
 
 ## Required closure before calling the fork complete
 
-1. Audit and commit the public updater configuration, perform the initial push,
-   and bind the push-triggered `handy-api-ci.yml` run to that exact commit.
-2. Run upstream-sync until the exact unsigned candidate and all gates pass.
-   Review them and approve `handy-api-signing`.
-3. Wait for the isolated signer to finish and `publish-release` to pause on
+1. Commit and push the filename-canonicalization fix, then bind the
+   push-triggered `handy-api-ci.yml` run to that new exact commit.
+2. Dispatch a fresh upstream-sync run until the exact unsigned candidate and all
+   gates pass. Review it and stop at the unapproved `handy-api-signing` gate for
+   the currently authorized phase.
+3. After separate authorization, approve signing, wait for the isolated signer
+   to finish, and confirm `publish-release` pauses on
    `handy-api-production`. Download that run's exact signed Windows x64
    artifact, install it alongside
    official Handy, and execute the unchecked
