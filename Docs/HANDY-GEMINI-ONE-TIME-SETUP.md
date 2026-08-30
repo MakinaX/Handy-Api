@@ -6,32 +6,30 @@ dedicated updater keypair is configured. The inherited official Handy release
 and main-build workflows are repository-identity gated and cannot publish from
 this fork.
 
-## 1. Create the public fork repository and remotes
+## 1. Authenticate and connect the existing public fork
 
-GitHub Release assets are the public updater transport, so a private repository
-is intentionally rejected. Starting from this reviewed checkout, replace
-`<owner>` once and run:
+The public updater repository already exists as `MakinaX/Handy-Gemini`, and
+this checkout already has the safe remote layout. On a trusted machine, log in
+as the `MakinaX` owner and enable Git's HTTPS credential integration:
 
 ```bash
-fork_repo="<owner>/Handy-Gemini"
-gh repo create "$fork_repo" \
-  --public \
-  --description "Personal Windows Handy fork with Gemini transcription"
+gh auth login --hostname github.com --git-protocol https --web
+gh auth setup-git
 
-# This checkout began with cjpais/Handy as origin. Preserve it as the read-only
-# upstream owner and make the new repository the only push remote named origin.
-git remote rename origin upstream
-git remote add origin "git@github.com:${fork_repo}.git"
+fork_repo="MakinaX/Handy-Gemini"
+gh repo view "$fork_repo" --json nameWithOwner,visibility
+
+git remote set-url origin "https://github.com/${fork_repo}.git"
+git remote set-url upstream "https://github.com/cjpais/Handy.git"
 git remote set-url --push upstream DISABLED
 git remote -v
 
 git push --set-upstream origin HEAD:main
-gh repo view "$fork_repo" --json nameWithOwner,visibility
 ```
 
-The final command must report `PUBLIC` and the exact name
-`<owner>/Handy-Gemini`. If an `upstream` remote already exists, verify that it
-points to `https://github.com/cjpais/Handy.git` instead of renaming over it.
+The repository read-back must report `PUBLIC` and the exact name
+`MakinaX/Handy-Gemini`. The remote read-back must show that only `origin` can
+push and that official `cjpais/Handy` remains the fetch-only `upstream`.
 
 Enable read/write permissions for the repository's automatic token:
 
@@ -72,10 +70,10 @@ Do not add branch protection that blocks GitHub Actions from fast-forwarding
 `main`. The workflow first pushes and tests an immutable candidate branch;
 it advances `main` only after every gate and remote draft-asset read-back pass.
 
-## 2. Bind both updater clients to the fork
+## 2. Verify both updater clients are bound to the fork
 
-Replace `REPLACE_WITH_GITHUB_OWNER` with the exact GitHub owner from
-`$fork_repo` in only these runtime files:
+Commit `e784b2e15604d040875ec11cdc03d3ea2b8ba5d7` already binds the owner in
+these two runtime files:
 
 - `src-tauri/tauri.conf.json`
 - `src/components/update-checker/portableInstaller.ts`
@@ -83,7 +81,7 @@ Replace `REPLACE_WITH_GITHUB_OWNER` with the exact GitHub owner from
 Both URLs must resolve to:
 
 ```text
-https://github.com/<owner>/Handy-Gemini/releases/latest
+https://github.com/MakinaX/Handy-Gemini/releases/latest
 ```
 
 The Tauri endpoint appends `/download/latest.json`; the portable installer uses
@@ -161,11 +159,9 @@ bun scripts/check-handy-gemini-release.ts \
   --release \
   --repository "$fork_repo"
 
-git add \
-  src-tauri/tauri.conf.json \
-  src/components/update-checker/portableInstaller.ts
+git add src-tauri/tauri.conf.json
 git commit -m "chore: bind Handy Gemini updater identity"
-git push origin main
+git push origin HEAD:main
 ```
 
 Run CI first and wait for it to finish:
