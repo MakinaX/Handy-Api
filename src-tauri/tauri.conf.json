@@ -80,7 +80,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNBRUM2NjdGNzI0MDlFMzIKUldReW5rQnlmMmJzT2l0VTJoT3R5cTB1UmZYeW9BKzRIaENNSUx4eXcyTzVNNENsakRTYU9XbmEK",
       "endpoints": [
         "https://github.com/MakinaX/Handy-Api/releases/latest/download/latest.json"
       ]

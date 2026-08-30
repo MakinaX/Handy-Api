@@ -16,10 +16,11 @@ paths have not been exercised on Windows.
 
 The product and repository identity is now `Handy API` / `MakinaX/Handy-Api`.
 The Director reports that GitHub authentication and a dedicated updater
-keypair already exist on the trusted Windows machine. No key value was read.
-Release mode deliberately remains fail-closed until the public key is committed
-and the environment-level secrets plus two protected approval environments are
-configured in a separately authorized phase. The exact procedure is in
+keypair already exist on the trusted Windows machine. The updater public key is
+now bound to the fork and the strict release contract passes. The private key
+and password were not read or printed. The environment-level secrets and both
+protected approval environments are configured; signing remains fail-closed at
+the unapproved `handy-api-signing` environment gate. The exact procedure is in
 `Docs/HANDY-API-ONE-TIME-SETUP.md`.
 
 ## Fresh baseline and adopted upstream work
@@ -159,7 +160,7 @@ results for the committed Handy API tree.
 | Live Gemini acceptance corpus                   | NOT EXECUTED         | Gemini API key is unavailable                                         |
 | Windows F1/ESC/paste/history/manual matrix      | NOT EXECUTED         | no Windows runtime/runner in the local environment                    |
 | Windows migration/Credential Manager            | NOT EXECUTED         | Windows app-data and credential APIs unavailable locally              |
-| Windows installer/runtime/update retention      | NOT EXECUTED         | public key/environment secrets unset; no Windows Actions run exists   |
+| Windows installer/runtime/update retention      | NOT EXECUTED         | no unsigned candidate or physical Windows acceptance run exists       |
 
 ## Current Handy API tree verification
 
@@ -168,28 +169,28 @@ tree on 2026-08-30. They supersede the historical baseline rows for the checks
 that can be executed on this Linux host. Windows and live-provider acceptance
 remain explicitly outside this phase.
 
-| Check                                      | Result               | Current-tree evidence / limitation                                       |
-| ------------------------------------------ | -------------------- | ------------------------------------------------------------------------ |
-| Frozen Bun dependency install              | PASS                 | Bun 1.2.23; 355 installs / 427 packages; lockfile unchanged              |
-| Translation parity                         | PASS                 | 452 keys; all 23 non-English locales complete                            |
-| ESLint                                     | PASS                 | full `src` tree                                                          |
-| TypeScript no-emit                         | PASS                 | strict project type-check                                                |
-| Prettier                                   | PASS                 | full repository check                                                    |
-| TypeScript + production Vite build         | PASS                 | 2,117 modules; inherited large-chunk warning only                        |
-| Portable updater assertions                | PASS                 | positive case plus foreign host/repo/tag/name/query/fragment rejection   |
-| Playwright                                 | PASS                 | 2/2 tests in Playwright 1.58.0 Noble container                           |
-| Workflow YAML parse                        | PASS                 | all 11 workflow files                                                    |
-| Release contract, scaffold mode            | PASS                 | exact `MakinaX/Handy-Api`; version `0.9.6-api.1`                         |
-| Release contract, release mode             | EXPECTED FAIL-CLOSED | exactly one error: updater public-key placeholder                        |
-| Wrong/case-drifted repository contract     | PASS                 | non-exact repository identity rejected                                   |
-| Locked Cargo metadata                      | PASS                 | package/lock identity and version consistent                             |
-| Rustfmt                                    | PASS                 | Rust 1.88.0, all targets                                                 |
-| Clippy defect-bearing groups               | PASS                 | all targets; correctness/suspicious/perf denied                          |
-| Locked Rust tests, Linux target            | PASS                 | 262 passed, 0 failed                                                     |
-| Vulkan/ONNX Runtime compatibility boundary | PASS                 | Vulkan 1.4.309 headers; dynamic ORT 1.24.2 with glibc 2.34 ceiling       |
-| Nix metadata and lazy package evaluation   | PASS                 | x86_64/aarch64 `mainProgram` is exactly `handy-api`                      |
-| Actual Nix package build                   | PASS                 | Nix 2.31.2; `handy-api` exists and legacy `handy` is absent              |
-| Final public-leak audit                    | PASS                 | 384 files plus ignored/history scan; no secret or private artifact found |
+| Check                                      | Result | Current-tree evidence / limitation                                       |
+| ------------------------------------------ | ------ | ------------------------------------------------------------------------ |
+| Frozen Bun dependency install              | PASS   | Bun 1.2.23; 355 installs / 427 packages; lockfile unchanged              |
+| Translation parity                         | PASS   | 452 keys; all 23 non-English locales complete                            |
+| ESLint                                     | PASS   | full `src` tree                                                          |
+| TypeScript no-emit                         | PASS   | strict project type-check                                                |
+| Prettier                                   | PASS   | full repository check                                                    |
+| TypeScript + production Vite build         | PASS   | 2,117 modules; inherited large-chunk warning only                        |
+| Portable updater assertions                | PASS   | positive case plus foreign host/repo/tag/name/query/fragment rejection   |
+| Playwright                                 | PASS   | 2/2 tests in Playwright 1.58.0 Noble container                           |
+| Workflow YAML parse                        | PASS   | all 11 workflow files                                                    |
+| Release contract, scaffold mode            | PASS   | exact `MakinaX/Handy-Api`; version `0.9.6-api.1`                         |
+| Release contract, release mode             | PASS   | dedicated updater public key satisfies the strict Minisign contract      |
+| Wrong/case-drifted repository contract     | PASS   | non-exact repository identity rejected                                   |
+| Locked Cargo metadata                      | PASS   | package/lock identity and version consistent                             |
+| Rustfmt                                    | PASS   | Rust 1.88.0, all targets                                                 |
+| Clippy defect-bearing groups               | PASS   | all targets; correctness/suspicious/perf denied                          |
+| Locked Rust tests, Linux target            | PASS   | 262 passed, 0 failed                                                     |
+| Vulkan/ONNX Runtime compatibility boundary | PASS   | Vulkan 1.4.309 headers; dynamic ORT 1.24.2 with glibc 2.34 ceiling       |
+| Nix metadata and lazy package evaluation   | PASS   | x86_64/aarch64 `mainProgram` is exactly `handy-api`                      |
+| Actual Nix package build                   | PASS   | Nix 2.31.2; `handy-api` exists and legacy `handy` is absent              |
+| Final public-leak audit                    | PASS   | 384 files plus ignored/history scan; no secret or private artifact found |
 
 The Nix build completed from a read-only checkout in an isolated Nix 2.31.2
 container. It used checksum-verified static crates.io downloads and Bun's
@@ -199,15 +200,26 @@ is inferred from this package-build result.
 
 ## External capability state
 
-- GitHub authentication as `MakinaX`: **DIRECTOR-REPORTED COMPLETE** on the
-  trusted Windows machine; no credential value was accessed from this checkout.
+- GitHub authentication and repository authority: **DIRECTOR-PROVIDED
+  READ-BACK PASS** on the trusted Windows machine (`MakinaX`, exact public
+  `MakinaX/Handy-Api`, `ADMIN`). No credential value was accessed from this
+  checkout.
+- GitHub Actions default token permissions: **DIRECTOR-PROVIDED READ-BACK
+  PASS** (`write`, with pull-request review approval disabled).
 - Repository target: `MakinaX/Handy-Api`; the initial push has not been made.
 - Official `cjpais/Handy`: retained as fetch-only `upstream` with push disabled.
 - Dedicated Handy API updater keypair: **DIRECTOR-REPORTED CREATED** outside the
-  repository. The private key and password were not read or printed.
-- Fork GitHub owner: bound to `MakinaX`; updater public key remains the
-  intentional fail-closed placeholder. The `handy-api-signing` environment
-  secrets and both protected approval environments have not been changed.
+  repository. The Director reports that SHA-256 receipts for the original and
+  two encrypted private-key backups are identical; no hash value is recorded.
+  The private key and password were not read or printed.
+- Fork GitHub owner: bound to `MakinaX`; the updater public key is configured
+  and release-mode contract verification passes. The Director-provided
+  read-backs confirm both `handy-api-signing` and `handy-api-production` exist
+  with `MakinaX` as their required reviewer and
+  `prevent_self_review=false`. The two updater signing secrets exist exactly
+  under `handy-api-signing`; repository and production scopes contain neither,
+  and no Gemini API secret exists in any of the three audited scopes. Secret
+  values were not read back.
 - Windows Authenticode identity: not configured. Tauri updater signatures are
   separate; the first personal installer may display Unknown Publisher.
 - Local Windows build capability: unavailable on this x86_64 Linux
@@ -217,11 +229,10 @@ No credential values were read, logged, or added to the repository.
 
 ## Required closure before calling the fork complete
 
-1. In a separately authorized phase, commit the updater public key, configure
-   the two environment-level signing secrets only under `handy-api-signing`,
-   create both protected approval environments, and perform the initial push.
-2. Run `handy-api-ci.yml`, then run upstream-sync until the exact unsigned
-   candidate and all gates pass. Review them and approve `handy-api-signing`.
+1. Audit and commit the public updater configuration, perform the initial push,
+   and bind the push-triggered `handy-api-ci.yml` run to that exact commit.
+2. Run upstream-sync until the exact unsigned candidate and all gates pass.
+   Review them and approve `handy-api-signing`.
 3. Wait for the isolated signer to finish and `publish-release` to pause on
    `handy-api-production`. Download that run's exact signed Windows x64
    artifact, install it alongside

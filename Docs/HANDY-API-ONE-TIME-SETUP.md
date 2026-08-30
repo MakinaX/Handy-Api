@@ -194,38 +194,67 @@ public key and cryptographically verifies that exact installer.
 
 ## 4. Run the fail-closed gates, then publish only when authorized
 
-The identity-only tree must pass scaffold mode while the public-key placeholder
-remains:
+Before binding the public key, the identity-only tree must pass scaffold mode:
 
 ```bash
 bun scripts/check-handy-api-release.ts \
   --repository "$fork_repo"
 ```
 
-Release mode must remain fail-closed on that placeholder. In the next
-authorized phase, after adding only the public key, run the strict contract and
-commit the public configuration:
+After adding only the public key, release mode must pass. Commit the audited
+public configuration and evidence without adding either signing secret:
 
 ```bash
 bun scripts/check-handy-api-release.ts \
   --release \
   --repository "$fork_repo"
 
-git add src-tauri/tauri.conf.json
+git add -- \
+  src-tauri/tauri.conf.json \
+  Docs/HANDY-API-ONE-TIME-SETUP.md \
+  Docs/HANDY-API-IMPLEMENTATION-REPORT.md
 git commit -m "chore: bind Handy API updater identity"
+closure_sha="$(git rev-parse HEAD)"
 git push origin HEAD:main
 ```
 
-Run CI first and wait for it to finish:
+The initial `main` push starts `handy-api-ci.yml` automatically. Do not dispatch
+a duplicate manual run: both runs share a cancellation-enabled concurrency
+group, so the duplicate can cancel the push-owned evidence. Wait for the exact
+push run to appear, bind it to the committed SHA, and watch that run ID:
 
 ```bash
-gh workflow run handy-api-ci.yml --repo "$fork_repo" --ref main
-gh run watch --repo "$fork_repo" --exit-status
+ci_run_id="$(gh run list \
+  --repo "$fork_repo" \
+  --workflow handy-api-ci.yml \
+  --branch main \
+  --event push \
+  --commit "$closure_sha" \
+  --limit 1 \
+  --json databaseId \
+  --jq '.[0].databaseId')"
+
+test -n "$ci_run_id"
+test "$(gh run view "$ci_run_id" \
+  --repo "$fork_repo" \
+  --json headSha \
+  --jq .headSha)" = "$closure_sha"
+gh run watch "$ci_run_id" --repo "$fork_repo" --exit-status
 ```
 
-Then run the upstream-sync/release owner once:
+If no matching push run appears, stop and diagnose the trigger instead of
+starting an unbound replacement. After the exact push run passes, check that no
+scheduled or manually dispatched upstream-sync run is already active, then run
+the release owner once:
 
 ```bash
+gh run list \
+  --repo "$fork_repo" \
+  --workflow upstream-sync.yml \
+  --branch main \
+  --limit 10 \
+  --json databaseId,event,headSha,status,url
+
 gh workflow run upstream-sync.yml --repo "$fork_repo" --ref main
 ```
 
@@ -244,10 +273,18 @@ release_run_id="$(gh run list \
   --repo "$fork_repo" \
   --workflow upstream-sync.yml \
   --branch main \
+  --event workflow_dispatch \
+  --commit "$closure_sha" \
   --limit 1 \
   --json databaseId \
   --jq '.[0].databaseId')"
 
+test -n "$release_run_id"
+test "$(gh run view "$release_run_id" \
+  --repo "$fork_repo" \
+  --json event,headSha \
+  --jq '[.event, .headSha] | @tsv')" = \
+  "workflow_dispatch$(printf '\t')${closure_sha}"
 gh run view "$release_run_id" --repo "$fork_repo" --web
 gh run watch "$release_run_id" --repo "$fork_repo" --exit-status
 ```
