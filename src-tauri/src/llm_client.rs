@@ -143,13 +143,13 @@ fn build_headers(provider: &PostProcessProvider, api_key: &str) -> Result<Header
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
         REFERER,
-        HeaderValue::from_static("https://github.com/cjpais/Handy"),
+        HeaderValue::from_static("https://github.com/MakinaX/Handy-Gemini"),
     );
     headers.insert(
         USER_AGENT,
-        HeaderValue::from_static("Handy/1.0 (+https://github.com/cjpais/Handy)"),
+        HeaderValue::from_static("Handy-Gemini/1.0 (+https://github.com/MakinaX/Handy-Gemini)"),
     );
-    headers.insert("X-Title", HeaderValue::from_static("Handy"));
+    headers.insert("X-Title", HeaderValue::from_static("Handy Gemini"));
 
     // Provider-specific auth headers
     if !api_key.is_empty() {
@@ -626,6 +626,26 @@ mod tests {
         assert_eq!(
             sanitized_url_for_log("not a URL containing secret"),
             "<invalid URL>"
+        );
+    }
+
+    #[test]
+    fn request_identity_points_to_handy_gemini_source() {
+        let headers = build_headers(&provider("custom", "http://localhost:11434/v1"), "").unwrap();
+
+        assert_eq!(
+            headers.get(REFERER).and_then(|value| value.to_str().ok()),
+            Some("https://github.com/MakinaX/Handy-Gemini")
+        );
+        assert_eq!(
+            headers
+                .get(USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+            Some("Handy-Gemini/1.0 (+https://github.com/MakinaX/Handy-Gemini)")
+        );
+        assert_eq!(
+            headers.get("X-Title").and_then(|value| value.to_str().ok()),
+            Some("Handy Gemini")
         );
     }
 

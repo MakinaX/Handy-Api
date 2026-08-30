@@ -453,6 +453,27 @@ expect(
   "portable releases URL and updater endpoint target different repositories",
 );
 
+if (endpointRepository && endpointMatch?.[1] !== PLACEHOLDER_OWNER) {
+  const sourceUrl = `https://github.com/${endpointRepository}`;
+  const aboutSettings = read("src/components/settings/about/AboutSettings.tsx");
+  const llmClient = read("src-tauri/src/llm_client.rs");
+  expect(
+    aboutSettings.includes(`openUrl("${sourceUrl}")`),
+    "About source-code link does not target the fork repository",
+  );
+  expect(
+    llmClient.includes(`HeaderValue::from_static("${sourceUrl}")`) &&
+      llmClient.includes(`Handy-Gemini/1.0 (+${sourceUrl})`) &&
+      llmClient.includes('HeaderValue::from_static("Handy Gemini")'),
+    "post-processing request identity does not target Handy Gemini",
+  );
+  expect(
+    !aboutSettings.includes("https://github.com/cjpais/Handy") &&
+      !llmClient.includes("https://github.com/cjpais/Handy"),
+    "fork-owned runtime source identity still points to upstream Handy",
+  );
+}
+
 const legacyReleaseWorkflow = read(".github/workflows/release.yml");
 const inheritedMainBuild = read(".github/workflows/main-build.yml");
 const handyGeminiCi = read(".github/workflows/handy-gemini-ci.yml");
