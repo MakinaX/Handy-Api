@@ -53,6 +53,9 @@ env:
 
 jobs:
   build:
+    # This reusable workflow retains official Handy packaging assumptions.
+    # Handy API uses its dedicated fail-closed Windows release path.
+    if: github.repository == 'cjpais/Handy'
     permissions:
       contents: write
     runs-on: ${{ inputs.platform }}

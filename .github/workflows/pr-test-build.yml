@@ -10,6 +10,8 @@ on:
 
 jobs:
   build-test:
+    # Official Handy-only: Handy API has a dedicated candidate workflow.
+    if: github.repository == 'cjpais/Handy'
     permissions:
       contents: write
     strategy:
@@ -52,6 +54,7 @@ jobs:
 
   comment-on-pr:
     needs: build-test
+    if: github.repository == 'cjpais/Handy'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write

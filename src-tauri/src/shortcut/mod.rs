@@ -155,7 +155,7 @@ pub fn register_cancel_shortcut(app: &AppHandle) -> Result<(), String> {
         .get("cancel")
         .cloned()
         .ok_or_else(|| "Cancel shortcut binding is missing".to_string())?;
-    // Handy Gemini's Director contract reserves literal Escape for hard
+    // Handy API's Director contract reserves literal Escape for hard
     // cancellation. Persisted/imported settings are normalized on load, and
     // this assignment is the final defense against a stale external edit.
     binding.current_binding = "escape".to_string();
@@ -262,12 +262,12 @@ pub fn change_binding(
         }
     };
 
-    // Escape is a fixed safety control in Handy Gemini. Other shortcuts remain
+    // Escape is a fixed safety control in Handy API. Other shortcuts remain
     // configurable, but allowing this one to drift would silently break the
     // hard cancellation contract.
     if id == "cancel" {
         if !binding.trim().eq_ignore_ascii_case("escape") {
-            return Err("The cancel shortcut is fixed to Escape in Handy Gemini".to_string());
+            return Err("The cancel shortcut is fixed to Escape in Handy API".to_string());
         }
         if let Some(mut b) = settings.bindings.get(&id).cloned() {
             b.current_binding = "escape".to_string();

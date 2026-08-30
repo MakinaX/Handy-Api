@@ -1049,7 +1049,7 @@ pub fn get_settings(app: &AppHandle) -> AppSettings {
 
         settings
     } else {
-        // A distinct bundle identifier gives Handy Gemini its own store. On the
+        // A distinct bundle identifier gives Handy API its own store. On the
         // first launch only, import the official Handy preferences as a copy;
         // subsequent reads and writes always use this fork's store.
         let initial_settings = import_official_settings_once(app).unwrap_or_else(|| {
@@ -1178,7 +1178,7 @@ fn apply_settings_migrations(
         updated = true;
     }
 
-    // Handy Gemini reserves literal Escape as the always-available hard
+    // Handy API reserves literal Escape as the always-available hard
     // cancel control. Preserve every other imported/custom shortcut (notably
     // F1 transcription), but repair stale official/fork cancel bindings.
     if let Some(cancel) = settings.bindings.get_mut("cancel") {
@@ -1586,7 +1586,7 @@ mod tests {
 
     #[test]
     fn official_store_path_is_a_sibling_of_the_fork_store() {
-        let fork = std::path::Path::new("/profiles/computer.handy.gemini");
+        let fork = std::path::Path::new("/profiles/computer.handy.api");
         assert_eq!(
             official_settings_path(fork),
             Some(std::path::PathBuf::from(

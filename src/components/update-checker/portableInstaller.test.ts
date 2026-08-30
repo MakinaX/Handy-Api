@@ -7,20 +7,20 @@ import {
 } from "./portableInstaller";
 
 const RELEASES_BASE = PORTABLE_RELEASES_URL.replace(/\/latest$/, "");
-const X64_SETUP = `${RELEASES_BASE}/download/v0.9.6-gemini.1/Handy.Gemini_0.9.6-gemini.1_x64-setup.exe`;
-const ARM64_SETUP = `${RELEASES_BASE}/download/v0.9.6-gemini.1/Handy.Gemini_0.9.6-gemini.1_arm64-setup.exe`;
+const X64_SETUP = `${RELEASES_BASE}/download/v0.9.6-api.1/Handy.API_0.9.6-api.1_x64-setup.exe`;
+const ARM64_SETUP = `${RELEASES_BASE}/download/v0.9.6-api.1/Handy.API_0.9.6-api.1_arm64-setup.exe`;
 
 // Trimmed copy of the real latest.json served from the updater endpoint.
 const manifest = {
-  version: "0.9.6-gemini.1",
+  version: "0.9.6-api.1",
   platforms: {
     "windows-x86_64-nsis": { url: X64_SETUP, signature: "…" },
     "windows-x86_64-msi": {
-      url: `${RELEASES_BASE}/download/v0.9.6-gemini.1/Handy.Gemini_0.9.6-gemini.1_x64_en-US.msi`,
+      url: `${RELEASES_BASE}/download/v0.9.6-api.1/Handy.API_0.9.6-api.1_x64_en-US.msi`,
     },
     "windows-aarch64-nsis": { url: ARM64_SETUP, signature: "…" },
     "darwin-aarch64": {
-      url: `${RELEASES_BASE}/download/v0.9.6-gemini.1/Handy.Gemini_aarch64.app.tar.gz`,
+      url: `${RELEASES_BASE}/download/v0.9.6-api.1/Handy.API_aarch64.app.tar.gz`,
     },
   },
 };
@@ -58,6 +58,49 @@ assert.equal(
 // malformed manifest -> releases page fallback
 assert.equal(
   resolvePortableInstallerUrl({ platforms: "nope" }, "windows", "x86_64"),
+  PORTABLE_RELEASES_URL,
+);
+
+for (const foreignUrl of [
+  "http://github.com/MakinaX/Handy-Api/releases/download/v0.9.6-api.1/Handy.API_0.9.6-api.1_x64-setup.exe",
+  "https://evil.example/MakinaX/Handy-Api/releases/download/v0.9.6-api.1/Handy.API_0.9.6-api.1_x64-setup.exe",
+  "https://github.com/cjpais/Handy/releases/download/v0.9.6-api.1/Handy.API_0.9.6-api.1_x64-setup.exe",
+  "https://github.com/MakinaX/Handy-Api/releases/download/v0.9.5-api.1/Handy.API_0.9.6-api.1_x64-setup.exe",
+  "https://github.com/MakinaX/Handy-Api/releases/download/v0.9.6-api.1/Handy_0.9.6-api.1_x64-setup.exe",
+  `${X64_SETUP}?download=1`,
+  `${X64_SETUP}#foreign`,
+]) {
+  assert.equal(
+    resolvePortableInstallerUrl(
+      {
+        version: "0.9.6-api.1",
+        platforms: {
+          "windows-x86_64-nsis": {
+            url: foreignUrl,
+            signature: "…",
+          },
+        },
+      },
+      "windows",
+      "x86_64",
+    ),
+    PORTABLE_RELEASES_URL,
+  );
+}
+
+// The manifest version must use the provider-neutral fork suffix and must
+// agree with both the tag and the exact installer filename.
+assert.equal(
+  resolvePortableInstallerUrl(
+    {
+      version: "0.9.6-cloud.1",
+      platforms: {
+        "windows-x86_64-nsis": { url: X64_SETUP, signature: "…" },
+      },
+    },
+    "windows",
+    "x86_64",
+  ),
   PORTABLE_RELEASES_URL,
 );
 

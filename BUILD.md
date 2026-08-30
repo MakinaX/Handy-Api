@@ -1,6 +1,7 @@
 # Build Instructions
 
-This guide covers how to set up the development environment and build Handy from source across different platforms.
+This guide covers how to set up the development environment and build Handy API
+from source. Commands and paths use the fork's provider-neutral identity.
 
 ## Prerequisites
 
@@ -92,8 +93,8 @@ ORT_LIB_LOCATION=$(brew --prefix onnxruntime)/lib ORT_PREFER_DYNAMIC_LINK=1 bun 
 ### 1. Clone the Repository
 
 ```bash
-git clone git@github.com:cjpais/Handy.git
-cd Handy
+git clone git@github.com:MakinaX/Handy-Api.git
+cd Handy-Api
 ```
 
 ### 2. Install Dependencies
@@ -118,28 +119,32 @@ This compiles a release binary and generates platform-specific bundles (deb, rpm
 
 ## Linux Install (from source)
 
-The raw binary (`src-tauri/target/release/handy`) cannot run standalone — it needs Tauri resource files (tray icons, sounds, VAD model) to be co-located at the expected path.
+The raw binary (`src-tauri/target/release/handy-api`) cannot run standalone — it
+needs Tauri resource files (tray icons, sounds, VAD model) to be co-located at
+the expected path.
 
 **Install from the deb bundle** (works on any Linux distro):
 
 ```bash
 cd /tmp
-ar x /path/to/Handy/src-tauri/target/release/bundle/deb/Handy_*_amd64.deb data.tar.gz
+ar x /path/to/Handy-Api/src-tauri/target/release/bundle/deb/Handy.API_*_amd64.deb data.tar.gz
 tar xzf data.tar.gz
-sudo cp usr/bin/handy /usr/bin/
+sudo cp usr/bin/handy-api /usr/bin/
 sudo cp -a usr/lib/. /usr/lib/
 sudo cp -r usr/share/icons/hicolor/* /usr/share/icons/hicolor/
-sudo cp usr/share/applications/Handy.desktop /usr/share/applications/
+sudo cp "usr/share/applications/Handy API.desktop" /usr/share/applications/
 ```
 
-The runtime libraries live in the app-private `/usr/lib/Handy/` (on the binary's rpath), so no `ldconfig` step is needed.
+The runtime libraries live in the app-private `/usr/lib/handy-api/` (on the
+binary's rpath), so they do not collide with official Handy and no `ldconfig`
+step is needed.
 
 After subsequent rebuilds, copy the binary and any refreshed runtime libraries:
 
 ```bash
-sudo cp src-tauri/target/release/handy /usr/bin/
-sudo mkdir -p /usr/lib/Handy
-sudo cp -a src-tauri/transcribe-libs/. /usr/lib/Handy/
+sudo cp src-tauri/target/release/handy-api /usr/bin/
+sudo mkdir -p /usr/lib/handy-api
+sudo cp -a src-tauri/transcribe-libs/. /usr/lib/handy-api/
 ```
 
 Resources only need re-copying if they change upstream (new icons, sounds, models, etc.).
@@ -150,15 +155,15 @@ Resources only need re-copying if they change upstream (new icons, sounds, model
 
 Local builds use the ad-hoc `signingIdentity: "-"`. A rebuild can have a new macOS code
 identity while the old **System Settings > Privacy & Security > Accessibility** entry
-remains visibly enabled, leaving Handy on `Waiting...`.
+remains visibly enabled, leaving Handy API on `Waiting...`.
 
-After installing the final bundle at `/Applications/Handy.app`, quit Handy, clear only its
+After installing the final bundle at `/Applications/Handy API.app`, quit Handy API, clear only its
 stale Accessibility record, then reopen it:
 
 ```bash
-osascript -e 'tell application id "com.pais.handy" to quit' || true
-tccutil reset Accessibility com.pais.handy
-open /Applications/Handy.app
+osascript -e 'tell application id "computer.handy.api" to quit' || true
+tccutil reset Accessibility computer.handy.api
+open "/Applications/Handy API.app"
 ```
 
 Grant Accessibility again when prompted. This does not reset Microphone or other TCC
@@ -168,14 +173,14 @@ For optional diagnosis, compare the designated requirements of the previous and 
 bundles:
 
 ```bash
-codesign -dr - /path/to/previous/Handy.app 2>&1
-codesign -dr - /Applications/Handy.app 2>&1
+codesign -dr - "/path/to/previous/Handy API.app" 2>&1
+codesign -dr - "/Applications/Handy API.app" 2>&1
 ```
 
 An ad-hoc requirement contains a `cdhash`; a changed requirement confirms the rebuild is
 not covered by the old grant. The reset procedure does not require this check.
 
-See [issue #1618](https://github.com/cjpais/Handy/issues/1618) for the related onboarding
+See upstream Handy [issue #1618](https://github.com/cjpais/Handy/issues/1618) for the related onboarding
 and stale-permission report.
 
 ### AppImage build fails on Arch / rolling-release distros
@@ -185,7 +190,7 @@ and stale-permission report.
 The error from Tauri:
 
 ```
-Bundling Handy_*_amd64.AppImage
+Bundling Handy.API_*_amd64.AppImage
 failed to bundle project `failed to run linuxdeploy`
 ```
 
@@ -194,7 +199,7 @@ Tauri swallows the real linuxdeploy error. To see it, run linuxdeploy manually:
 ```bash
 cd src-tauri/target/release/bundle/appimage
 ~/.cache/tauri/linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
-  --appdir Handy.AppDir --plugin gtk --output appimage
+  --appdir Handy.API.AppDir --plugin gtk --output appimage
 ```
 
 **Workaround:** The binary, deb, and rpm bundles all build fine — only the AppImage step fails. To skip it:
@@ -249,7 +254,7 @@ around either case with a short Cargo target directory:
 $env:CARGO_TARGET_DIR = "C:\h"
 
 # Or persist it for all future terminals (note: redirects ALL your
-# Rust projects' build output, not just Handy):
+# Rust projects' build output, not just Handy API):
 [Environment]::SetEnvironmentVariable('CARGO_TARGET_DIR', 'C:\h', 'User')
 ```
 
@@ -260,17 +265,22 @@ and `bun run tauri build` work normally.
 
 ### Windows `tauri build` fails at bundling with `program not found`
 
-If the build compiles all the way to `Built application at: ...\handy.exe` and
-then fails with:
+If the build compiles all the way to
+`Built application at: ...\handy-api.exe` and then fails with a custom signing
+command error, verify that you are using the Handy API configuration. This fork
+deliberately removes the official Handy Azure `signCommand`; updater signing is
+owned by the separate fail-closed release workflow.
+
+An error that still names `handy.exe` or `trusted-signing-cli` indicates stale
+official build metadata rather than the Handy API release path. The inherited
+upstream error looked like this:
 
 ```
 Signing C:\...\handy.exe with a custom signing command
 failed to bundle project `program not found`
 ```
 
-that's the code-signing step: `tauri.conf.json` configures a custom
-`signCommand` (`trusted-signing-cli`, Azure Trusted Signing) that only exists
-in the release CI environment. Local development doesn't need it:
+Local development does not require Authenticode signing:
 
 ```powershell
 # Development (no bundling/signing at all):

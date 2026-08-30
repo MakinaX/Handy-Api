@@ -1,4 +1,8 @@
-# Handy Gemini STT-003 Phase 0 receipt
+# Handy API STT-003 Phase 0 receipt
+
+Historical note: this identity-normalized copy preserves the hashes, counts,
+and outcomes recorded before the Handy API naming decision. The exact original
+receipt remains available at commit `17ccbf61bdac265654ae46f5f5b3cb1acbb697a2`.
 
 Recorded: 2026-08-30T00:07:05Z
 
@@ -11,7 +15,7 @@ Recorded: 2026-08-30T00:07:05Z
   `d7cbb2e5a55b78c32ecbbe1259eee230ae5f11c8`
 - Preserved implementation tree:
   `2a619f79e45306afb4afced800d44d7f756431cb`
-- Branch: `handy-gemini-v0.9.6`
+- Current identity branch: `codex/handy-api-v0.9.6`
 - Commit scope: 83 paths, 7,223 insertions, 522 deletions
 
 The preservation commit was created locally. No branch, tag, artifact, or
@@ -21,10 +25,10 @@ release was pushed.
 
 - `upstream` fetch URL: official `cjpais/Handy`
 - `upstream` push URL: `DISABLED`
-- fork `origin`: not configured
+- fork `origin`: not configured at the time of this receipt
 
-No remote may receive this branch until the Director-owned public fork is
-created and configured as `origin`.
+At recording time, no remote could receive this branch until a Director-owned
+public fork was created and configured as `origin`.
 
 ## Public-leak gate
 
@@ -51,12 +55,12 @@ content scans. The staged index was independently re-audited before commit.
 ## Validation receipt
 
 - Primary implementation run: Rust `261/261` PASS.
-- Current tree: ESLint PASS, TypeScript PASS, Vite build PASS, full-repository
+- Recorded pre-identity tree: ESLint PASS, TypeScript PASS, Vite build PASS, full-repository
   Prettier PASS, translation parity PASS (`452` keys across `23` non-English
   locales), Playwright `2/2` PASS, release scaffold contract PASS, and staged
   diff/public-content audit PASS.
-- Strict release contract remains fail-closed solely on the GitHub owner and
-  updater public-key placeholders.
+- At recording time, the strict release contract remained fail-closed on the
+  GitHub-owner and updater-public-key placeholders.
 - An additional disposable Linux Rust rerun completed system dependency setup
   but stopped before compilation because that image lacked `cargo-fmt`. This
   environment-only attempt is not counted as a test failure and does not
@@ -66,8 +70,8 @@ content scans. The staged index was independently re-audited before commit.
 
 - Phase 0: **PASS**
 - Phase 0.5: **PASS**
-- Phase 1 onward: **BLOCKED / NOT EXECUTED** until the external fork,
-  authentication, updater signing secrets, protected production environment,
-  and physical Windows acceptance capabilities exist.
+- At recording time, Phase 1 onward was **BLOCKED / NOT EXECUTED** pending the
+  external fork, authentication, updater signing secrets, protected production
+  environment, and physical Windows acceptance capabilities.
 
 No secret value is recorded in this receipt.

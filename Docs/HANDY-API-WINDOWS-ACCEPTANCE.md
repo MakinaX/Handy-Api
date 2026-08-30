@@ -1,4 +1,8 @@
-# Handy Gemini Windows acceptance
+# Handy API Windows acceptance
+
+This matrix supersedes the pre-release Gemini-named product matrix. Gemini
+remains the first cloud STT provider; every product, repository, installer,
+data, updater, and evidence identity below belongs to Handy API.
 
 Overall status: **NOT EXECUTED**
 
@@ -10,15 +14,15 @@ unit-test pass alone is not acceptance.
 ## Evidence rules
 
 - [ ] Create one evidence directory named
-      `handy-gemini-<version>-windows-acceptance`.
+      `handy-api-<version>-windows-acceptance`.
 - [ ] Record the tester, UTC start/end time, Windows build, CPU/GPU, microphone,
-      audio driver, official Handy version, Handy Gemini version, release tag,
+      audio driver, official Handy version, Handy API version, release tag,
       and tested candidate commit SHA.
 - [ ] Record the successful CI URL and the upstream-sync URL that produced the
       exact acceptance artifact. Export the job summaries/logs and, after
       approval, the release's exact three-asset inventory.
 - [ ] Record SHA-256 for the downloaded installer, its `.sig`, `latest.json`,
-      and the installed `handy-gemini.exe`:
+      and the installed `handy-api.exe`:
 
   ```powershell
   Get-FileHash -Algorithm SHA256 <path> | Format-List Path, Hash
@@ -36,45 +40,59 @@ unit-test pass alone is not acceptance.
 
 ## Capability gates
 
-- [ ] A public `<owner>/Handy-Gemini` repository exists, `main` is its default
+- [ ] The public `MakinaX/Handy-Api` repository exists, `main` is its default
       branch, and `origin` points to it while `upstream` points read-only to
       `cjpais/Handy`.
 - [ ] `REPLACE_WITH_GITHUB_OWNER` and
       `REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY` are absent from runtime config.
-- [ ] Repository secrets `TAURI_SIGNING_PRIVATE_KEY` and
-      `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are present by name; values are not
-      displayed.
-- [ ] The protected GitHub environment `handy-gemini-production` exists with a
-      human required reviewer. Publication cannot begin without that approval.
-- [ ] `handy-gemini-ci.yml` completed successfully for the exact candidate. The
-      upstream-sync candidate gates, release contract, signed Windows build,
-      installed-runtime smoke, and artifact upload succeeded; its production
-      job is waiting for `handy-gemini-production` approval. Capture URLs and
-      SHA with:
+- [ ] Environment-level secrets `TAURI_SIGNING_PRIVATE_KEY` and
+      `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are present by name only under
+      `handy-api-signing`; they are absent from repository secrets and
+      `handy-api-production`. Values are never displayed.
+- [ ] Both protected environments, `handy-api-signing` and
+      `handy-api-production`, exist with a human required reviewer. Signing and
+      publication require two separate approvals.
+- [ ] `handy-api-ci.yml` completed successfully for the exact candidate,
+      including its Nix evaluation/package build. The upstream-sync candidate
+      gates, release contract, unsigned exact Windows build, installed-runtime
+      smoke, and unsigned artifact upload succeeded. The signer job is waiting
+      for `handy-api-signing`; capture URLs and SHA with:
 
   ```powershell
-  gh run list --repo <owner>/Handy-Gemini --limit 20
-  gh run view <run-id> --repo <owner>/Handy-Gemini `
+  gh run list --repo MakinaX/Handy-Api --limit 20
+  gh run view <run-id> --repo MakinaX/Handy-Api `
     --json url,headSha,conclusion,workflowName
   ```
 
+- [ ] Review the tested candidate SHA, all automated gate receipts, and the
+      unsigned installer hash. Approve `handy-api-signing` only for that exact
+      run, and record reviewer identity plus UTC approval time. Confirm the
+      signing job had no candidate checkout or candidate code execution; only
+      its single signer step received the environment secrets.
+- [ ] The no-checkout signer installed exact Tauri CLI 2.11.4, produced the
+      exact `.sig`, verified it against the committed public key with the
+      digest-pinned Minisign verifier, and uploaded the signed artifact. The
+      same run's publish job is now waiting for the independent
+      `handy-api-production` approval.
+
 - [ ] While that exact run is waiting, download its artifact without approving
-      the environment. Record the run ID, artifact name, candidate SHA, version,
-      installer hash, and signature-file hash:
+      production. Record the run ID, artifact name, candidate SHA, version,
+      exact installer name, installer hash, and signature-file hash:
 
   ```powershell
   $RunId = "<run-id>"
   $Version = "<fork-version>"
-  $Artifact = "handy-gemini-windows-x64-$Version"
-  gh run download $RunId --repo <owner>/Handy-Gemini `
+  $Artifact = "handy-api-windows-x64-signed-$Version"
+  gh run download $RunId --repo MakinaX/Handy-Api `
     --name $Artifact --dir ".\acceptance-artifact"
   Get-ChildItem ".\acceptance-artifact" -File
   Get-FileHash -Algorithm SHA256 ".\acceptance-artifact\*"
   ```
 
-- [ ] The downloaded pre-approval artifact contains exactly one
-      `*-setup.exe` and its matching `*-setup.exe.sig`. `latest.json` is
-      expected only after the protected publish job is approved.
+- [ ] The downloaded pre-production artifact contains exactly
+      `Handy.API_<version>_x64-setup.exe` and its exact matching `.sig`, with no
+      foreign or extra installer. `latest.json` is expected only after the
+      protected production job is approved.
 - [ ] The test machine has a snapshot/backup, working physical microphone,
       network access, a disposable Gemini API key with quota, a local
       Whisper-family model including Large V3, Notepad, and a local HTTPS
@@ -84,14 +102,16 @@ unit-test pass alone is not acceptance.
       receipt.
 
 If any gate fails, stop with status **NOT EXECUTED** for all dependent cases.
-Do not approve `handy-gemini-production` merely to obtain the artifact.
+Do not approve `handy-api-signing` before reviewing the unsigned candidate and
+gates. Do not approve `handy-api-production` merely to obtain the signed
+artifact.
 
 ## Baseline state and counters
 
 - [ ] In a dedicated Windows test profile, configure official Handy with F1,
       the intended microphone/output device, paste mode, language, dictionary,
       VAD/audio preferences, and a compatible local model.
-- [ ] Before the first Handy Gemini launch, confirm the fork store does not
+- [ ] Before the first Handy API launch, confirm the fork store does not
       exist. Use a fresh profile or restore the snapshot for a rerun; do not
       delete an unbacked user profile.
 - [ ] Record SHA-256 of official Handy's `settings_store.json` before migration.
@@ -114,11 +134,11 @@ Notepad file before hashing it again.
 
 ## Side-by-side identity
 
-- [ ] Install official Handy and the release-built Handy Gemini NSIS package;
+- [ ] Install official Handy and the release-built Handy API NSIS package;
       Windows Installed Apps shows two separate entries.
 - [ ] Launch both once and capture process paths. The fork process is
-      `handy-gemini.exe`; no fork install directory contains `handy.exe`.
-- [ ] Confirm official Handy and Handy Gemini have different install, app-data,
+      `handy-api.exe`; no fork install directory contains `handy.exe`.
+- [ ] Confirm official Handy and Handy API have different install, app-data,
       log, settings, history/recordings, uninstall, tray, and updater ownership.
 - [ ] Changing a fork preference does not change the official settings-store
       hash, and changing an official preference after import does not change the
@@ -137,7 +157,7 @@ Notepad file before hashing it again.
 - [ ] Literal Escape is the fork cancel binding even if the official store had
       another cancel binding.
 - [ ] Official `settings_store.json` SHA-256 is unchanged by import.
-- [ ] Change official Handy settings, restart Handy Gemini, and confirm the fork
+- [ ] Change official Handy settings, restart Handy API, and confirm the fork
       does not re-import them. Then change fork settings and confirm official
       Handy remains unchanged.
 
@@ -163,14 +183,14 @@ for Gemini, zero transcription requests.
 
 | Case   | Backend           | Input                        | Repetitions | Expected                            | Status       |
 | ------ | ----------------- | ---------------------------- | ----------: | ----------------------------------- | ------------ |
-| HG-S01 | Local Large V3    | digital silence              |          20 | no inference output/side effects    | NOT EXECUTED |
-| HG-S02 | Local Large V3    | quiet room                   |          20 | no hallucinated output/side effects | NOT EXECUTED |
-| HG-S03 | Local Large V3    | fan/HVAC                     |          20 | no hallucinated output/side effects | NOT EXECUTED |
-| HG-S04 | Local Large V3    | keyboard/mouse               |          20 | no hallucinated output/side effects | NOT EXECUTED |
-| HG-S05 | Gemini Smart/Auto | all four fixed fixtures      |      5 each | zero requests and side effects      | NOT EXECUTED |
-| HG-S06 | Local and Gemini  | live room/fan/keyboard       |      1 each | no hallucinated output/side effects | NOT EXECUTED |
-| HG-S07 | Local and Gemini  | four short Korean utterances |      5 each | usable non-empty transcript         | NOT EXECUTED |
-| HG-S08 | Local and Gemini  | real background speech       |      1 each | speech may transcribe               | NOT EXECUTED |
+| HA-S01 | Local Large V3    | digital silence              |          20 | no inference output/side effects    | NOT EXECUTED |
+| HA-S02 | Local Large V3    | quiet room                   |          20 | no hallucinated output/side effects | NOT EXECUTED |
+| HA-S03 | Local Large V3    | fan/HVAC                     |          20 | no hallucinated output/side effects | NOT EXECUTED |
+| HA-S04 | Local Large V3    | keyboard/mouse               |          20 | no hallucinated output/side effects | NOT EXECUTED |
+| HA-S05 | Gemini Smart/Auto | all four fixed fixtures      |      5 each | zero requests and side effects      | NOT EXECUTED |
+| HA-S06 | Local and Gemini  | live room/fan/keyboard       |      1 each | no hallucinated output/side effects | NOT EXECUTED |
+| HA-S07 | Local and Gemini  | four short Korean utterances |      5 each | usable non-empty transcript         | NOT EXECUTED |
+| HA-S08 | Local and Gemini  | real background speech       |      1 each | speech may transcribe               | NOT EXECUTED |
 
 - [ ] Each Local repeated run uses the normal F1 microphone path, not only
       `--transcribe-file`, because the headless file path does not prove the
@@ -186,12 +206,12 @@ local model.
 
 | Case   | Dictation                                         | Expected                                 | Status       |
 | ------ | ------------------------------------------------- | ---------------------------------------- | ------------ |
-| HG-L01 | `네` / `응` / `아니` / `오케이`                   | short speech preserved                   | NOT EXECUTED |
-| HG-L02 | normal Korean sentence                            | accurate paste and one history/WAV entry | NOT EXECUTED |
-| HG-L03 | `GPT-5.6 Sol X-High 다음에 UltraCode로 검증해줘.` | dictionary spelling preserved            | NOT EXECUTED |
-| HG-L04 | `Codex에서 ProjectX 작업을 먼저 확인해줘.`        | code switching preserved                 | NOT EXECUTED |
-| HG-L05 | `Claude Code와 Gemini 결과를 비교해줘.`           | product spelling preserved               | NOT EXECUTED |
-| HG-L06 | long prompt with hesitation/self-correction       | complete usable transcript               | NOT EXECUTED |
+| HA-L01 | `네` / `응` / `아니` / `오케이`                   | short speech preserved                   | NOT EXECUTED |
+| HA-L02 | normal Korean sentence                            | accurate paste and one history/WAV entry | NOT EXECUTED |
+| HA-L03 | `GPT-5.6 Sol X-High 다음에 UltraCode로 검증해줘.` | dictionary spelling preserved            | NOT EXECUTED |
+| HA-L04 | `Codex에서 ProjectX 작업을 먼저 확인해줘.`        | code switching preserved                 | NOT EXECUTED |
+| HA-L05 | `Claude Code와 Gemini 결과를 비교해줘.`           | product spelling preserved               | NOT EXECUTED |
+| HA-L06 | long prompt with hesitation/self-correction       | complete usable transcript               | NOT EXECUTED |
 
 - [ ] F1 starts recording, F1 normally stops it, the selected exact model stays
       loaded, current-cursor paste succeeds, and the matching history/WAV entry
@@ -203,8 +223,8 @@ local model.
 
 - [ ] Save a valid disposable key, Test Connection succeeds, and Gemini is
       selectable without downloading or changing the local model.
-- [ ] Run HG-L01 through HG-L06 in Smart/Auto and Verbatim/Auto; run HG-L03
-      through HG-L05 once with `ko-KR`. Record request count, latency, exact
+- [ ] Run HA-L01 through HA-L06 in Smart/Auto and Verbatim/Auto; run HA-L03
+      through HA-L05 once with `ko-KR`. Record request count, latency, exact
       transcript, paste, history, and WAV outcome.
 - [ ] Add `GPT-5.6 Sol`, `X-High`, `UltraCode`, `Codex`, `Claude Code`, and
       `ProjectX` to the existing Handy Dictionary; confirm intended spellings
@@ -222,16 +242,16 @@ Use a fresh Notepad marker and pre/post counters for every repetition.
 
 | Case   | Action                                                           | Request expectation                                         | Other expected outcome             | Status       |
 | ------ | ---------------------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------- | ------------ |
-| HG-C01 | F1, speak, Escape while recording                                | Gemini delta 0                                              | no paste/history/WAV               | NOT EXECUTED |
-| HG-C02 | F1, speak, F1 stop, Escape immediately; repeat 20                | 0 if Escape wins admission; otherwise classify as in-flight | no paste/history/WAV               | NOT EXECUTED |
-| HG-C03 | throttle Gemini response to >=10 s; Escape after proxy sees POST | one admitted request may abort                              | no late paste/history/WAV          | NOT EXECUTED |
-| HG-C04 | Local Large V3, Escape during processing                         | not applicable                                              | no paste/history/WAV               | NOT EXECUTED |
-| HG-C05 | alternate rapid F1/Escape for 20 cycles                          | Gemini pre-admission cycles delta 0                         | returns Idle; no orphan output/WAV | NOT EXECUTED |
+| HA-C01 | F1, speak, Escape while recording                                | Gemini delta 0                                              | no paste/history/WAV               | NOT EXECUTED |
+| HA-C02 | F1, speak, F1 stop, Escape immediately; repeat 20                | 0 if Escape wins admission; otherwise classify as in-flight | no paste/history/WAV               | NOT EXECUTED |
+| HA-C03 | throttle Gemini response to >=10 s; Escape after proxy sees POST | one admitted request may abort                              | no late paste/history/WAV          | NOT EXECUTED |
+| HA-C04 | Local Large V3, Escape during processing                         | not applicable                                              | no paste/history/WAV               | NOT EXECUTED |
+| HA-C05 | alternate rapid F1/Escape for 20 cycles                          | Gemini pre-admission cycles delta 0                         | returns Idle; no orphan output/WAV | NOT EXECUTED |
 
-- [ ] HG-C01 is the strict no-send proof: sanitized proxy request delta is zero.
-- [ ] For every HG-C02 run, record whether upload admission or Escape won; an
+- [ ] HA-C01 is the strict no-send proof: sanitized proxy request delta is zero.
+- [ ] For every HA-C02 run, record whether upload admission or Escape won; an
       already admitted request is not mislabeled as a pre-admission send.
-- [ ] HG-C03 waits beyond the delayed provider response and confirms no late
+- [ ] HA-C03 waits beyond the delayed provider response and confirms no late
       cursor paste or successful history entry.
 - [ ] Escape remains registered during recording and pending transcription,
       and the next F1 operation works normally after every cancel.
@@ -239,7 +259,7 @@ Use a fresh Notepad marker and pre/post counters for every repetition.
 ## Windows Credential Manager
 
 - [ ] Before Save, no fork-owned Generic Credential is present. After Save,
-      Credential Manager contains service `computer.handy.gemini` and account
+      Credential Manager contains service `computer.handy.api` and account
       `gemini-api-key`; capture identity only, never the value.
 - [ ] Restart the app and Windows session; Test Connection succeeds without
       re-entering the key.
@@ -287,11 +307,12 @@ Use a fresh Notepad marker and pre/post counters for every repetition.
       for the artifact downloaded from the waiting run. Attach the signed
       decision receipt to that run URL.
 - [ ] A designated human reviewer, not automation, approves the waiting
-      `handy-gemini-production` environment only after reviewing that receipt.
+      `handy-api-production` environment only after reviewing that receipt.
       Record reviewer identity and UTC approval time; do not record credentials.
 - [ ] After approval, the same upstream-sync run completes successfully and
-      publishes a stable release containing exactly one `*-setup.exe`, its
-      matching `*-setup.exe.sig`, and `latest.json`, with no extra assets.
+      publishes a stable release containing exactly
+      `Handy.API_<version>_x64-setup.exe`, its matching `.sig`, and
+      `latest.json`, with no extra assets.
 - [ ] Download the three public assets, compare installer/signature SHA-256 with
       the pre-approval artifact, hash `latest.json`, and confirm its version and
       URL name the exact fork release rather than `cjpais/Handy`.
@@ -305,10 +326,10 @@ Use a fresh Notepad marker and pre/post counters for every repetition.
 ## Acceptance decision
 
 - [ ] Every row is executed with a receipt and all required outcomes pass.
-- [ ] CI/workflow URLs, waiting-run artifact identity, production approval
-      receipt, tested candidate SHA, release version, four release/file SHA-256
-      values, redacted logs, screenshots/video, corpus transcripts, and pre/post
-      counters are present in the evidence directory.
+- [ ] CI/workflow URLs, waiting-run artifact identity, separate signing and
+      production approval receipts, tested candidate SHA, release version, four
+      release/file SHA-256 values, redacted logs, screenshots/video, corpus
+      transcripts, and pre/post counters are present in the evidence directory.
 - [ ] Any failure is linked to a tracked defect and the release remains draft
       or unpromoted. Do not call the fork complete while any required row is
       `NOT EXECUTED` or failed.

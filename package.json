@@ -1,7 +1,7 @@
 {
-  "name": "handy-gemini",
+  "name": "handy-api",
   "private": true,
-  "version": "0.9.6-gemini.1",
+  "version": "0.9.6-api.1",
   "type": "module",
   "scripts": {
     "dev": "vite",

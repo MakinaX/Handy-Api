@@ -1,0 +1,218 @@
+name: "Handy API CI"
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Exact commit to test"
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "automation/upstream-*"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: handy-api-ci-${{ inputs.ref || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend-and-contracts:
+    if: github.repository == 'MakinaX/Handy-Api'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check fork identity and updater isolation
+        run: bun scripts/check-handy-api-release.ts
+
+      - name: Test portable updater resolution
+        run: bun src/components/update-checker/portableInstaller.test.ts
+
+      - name: Check translations
+        run: bun run check:translations
+
+      - name: Lint frontend
+        run: bun run lint
+
+      - name: Check frontend formatting
+        run: bunx prettier --check .
+
+      - name: Build frontend
+        run: bun run build
+
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+
+      - name: Run Playwright smoke tests
+        run: bun run test:playwright
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: handy-api-playwright-report
+          path: playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  rust-tests:
+    if: github.repository == 'MakinaX/Handy-Api'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils \
+            glslc \
+            libappindicator3-dev \
+            libasound2-dev \
+            libgtk-layer-shell-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libvulkan-dev \
+            libwebkit2gtk-4.1-dev \
+            spirv-headers
+
+      # Distribution Vulkan headers can lag the Vulkan-Hpp revision embedded by
+      # transcribe-cpp (Debian 12 ships 1.3.239, which lacks LayerSetting*EXT).
+      # Keep the system loader/runtime, but put one exact SDK first for CMake,
+      # headers, and shader tools.
+      - name: Install pinned Vulkan SDK
+        uses: humbletim/install-vulkan-sdk@30ba978f977e81b72d091fc8888feb1fb26f9aff # v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+
+      - name: Verify pinned Vulkan SDK headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$VULKAN_SDK_VERSION" = "1.4.309.0"
+          vulkan_header="$VULKAN_SDK/include/vulkan/vulkan_core.h"
+          test -f "$vulkan_header"
+          grep -Eq '^#define VK_HEADER_VERSION 309$' "$vulkan_header"
+          grep -q 'VkLayerSettingTypeEXT' "$vulkan_header"
+          grep -q 'VkLayerSettingsCreateInfoEXT' "$vulkan_header"
+          test -x "$VULKAN_SDK/bin/glslc"
+          echo "CMAKE_PREFIX_PATH=$VULKAN_SDK${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}" >> "$GITHUB_ENV"
+          echo "CPATH=$VULKAN_SDK/include${CPATH:+:$CPATH}" >> "$GITHUB_ENV"
+
+      # Match the release build's baseline dynamic ORT. Falling back to ort-sys's
+      # downloaded static archive can select a binary built against newer glibc
+      # (__isoc23_*), which cannot link on the Debian 12 compatibility floor.
+      - name: Install pinned baseline ONNX Runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          ort_version="1.24.2"
+          ort_archive="$RUNNER_TEMP/onnxruntime-linux-x86_64-${ort_version}.tgz"
+          ort_root="$RUNNER_TEMP/handy-api-ort-${ort_version}"
+          ort_dir="$ort_root/onnxruntime-linux-x86_64-${ort_version}"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            "https://blob.handy.computer/onnxruntime-linux-x86_64-${ort_version}.tgz" \
+            --output "$ort_archive"
+          echo "7e8062d5cda514fe3e31d805f9aabd50bed42d331994f66753d2dd697294b976  $ort_archive" | \
+            sha256sum --check --strict
+          mkdir "$ort_root"
+          tar -xzf "$ort_archive" -C "$ort_root"
+
+          ort_lib="$ort_dir/lib/libonnxruntime.so.1.24.2"
+          test -f "$ort_dir/lib/libonnxruntime.so"
+          test -f "$ort_dir/lib/libonnxruntime.so.1"
+          test -f "$ort_lib"
+          echo "873ed82ce0d898d6e588f31f415be11f9d9ac036984dcb9bbdc4e38058b1c8e4  $ort_lib" | \
+            sha256sum --check --strict
+          readelf -d "$ort_lib" | grep -F 'Library soname: [libonnxruntime.so.1]' >/dev/null
+          max_glibc="$(objdump -T "$ort_lib" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1)"
+          test "$max_glibc" = "GLIBC_2.34"
+          if objdump -T "$ort_lib" | grep '__isoc23_' >/dev/null; then
+            echo "Pinned baseline ONNX Runtime unexpectedly requires __isoc23 symbols" >&2
+            exit 1
+          fi
+
+          echo "ORT_LIB_LOCATION=$ort_dir/lib" >> "$GITHUB_ENV"
+          echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$ort_dir/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.88.0
+          components: clippy, rustfmt
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Check Rust formatting
+        working-directory: src-tauri
+        run: cargo fmt -- --check
+
+      - name: Run Clippy
+        working-directory: src-tauri
+        # Stable upstream v0.9.6 has hundreds of pre-existing style/complexity
+        # lints. Keep those out of the fork delta while failing release builds
+        # on Clippy's defect-bearing groups.
+        run: >-
+          cargo clippy --all-targets --locked --
+          -A clippy::all
+          -D clippy::correctness
+          -D clippy::suspicious
+          -D clippy::perf
+
+      - name: Run Rust tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+  nix-package:
+    if: github.repository == 'MakinaX/Handy-Api'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      # bun2nix 2.x imports a generated source path while evaluating the full
+      # package derivation. The no-build form of `flake check` forbids
+      # materializing that path, so keep this preflight lazy and let the real
+      # build below be the authoritative package gate.
+      - name: Validate Handy API flake metadata
+        run: |
+          nix flake metadata --no-write-lock-file
+          test "$(nix eval --raw .#packages.x86_64-linux.handy-api.meta.mainProgram)" = "handy-api"
+          test "$(nix eval --raw .#packages.aarch64-linux.handy-api.meta.mainProgram)" = "handy-api"
+
+      - name: Build and verify Handy API Nix package
+        run: |
+          nix build .#handy-api --print-build-logs
+          test -x result/bin/handy-api
+          test ! -e result/bin/handy

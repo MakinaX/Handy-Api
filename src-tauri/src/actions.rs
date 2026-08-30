@@ -989,7 +989,7 @@ impl ShortcutAction for TranscribeAction {
                     // WAV is an uncommitted artifact and every cancel/error
                     // branch below removes it.
                     let file_name =
-                        format!("handy-gemini-{}.wav", chrono::Utc::now().timestamp_millis());
+                        format!("handy-api-{}.wav", chrono::Utc::now().timestamp_millis());
                     let wav_path = hm.recordings_dir().join(&file_name);
                     let wav_saved = save_verified_recording(wav_path.clone(), samples).await;
 

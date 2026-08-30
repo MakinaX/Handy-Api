@@ -5,7 +5,7 @@
 //! process-scoped development/CI override and is never persisted or logged.
 
 #[cfg(any(target_os = "windows", test))]
-const SERVICE: &str = "computer.handy.gemini";
+const SERVICE: &str = "computer.handy.api";
 #[cfg(any(target_os = "windows", test))]
 const ACCOUNT: &str = "gemini-api-key";
 const ENV_KEY: &str = "HANDY_GEMINI_API_KEY";
@@ -88,8 +88,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn service_identity_is_fork_specific() {
-        assert_eq!(SERVICE, "computer.handy.gemini");
+    fn service_is_app_common_and_account_is_provider_specific() {
+        assert_eq!(SERVICE, "computer.handy.api");
         assert_ne!(SERVICE, "com.pais.handy");
         assert_eq!(ACCOUNT, "gemini-api-key");
     }

@@ -1,4 +1,8 @@
-# Development Commands
+# Handy API Development Commands
+
+Repository: `MakinaX/Handy-Api`
+
+Package and executable: `handy-api` / `handy-api.exe`
 
 **Environment Setup:**
 

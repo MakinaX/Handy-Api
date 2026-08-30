@@ -4,6 +4,8 @@ on: workflow_dispatch
 
 jobs:
   build-test:
+    # Official Handy-only: the reusable build keeps upstream package identity.
+    if: github.repository == 'cjpais/Handy'
     permissions:
       contents: write
     strategy:

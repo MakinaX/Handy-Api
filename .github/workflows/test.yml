@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   rust-tests:
-    # Replaced in Handy Gemini by handy-gemini-ci.yml.
+    # Replaced in Handy API by handy-api-ci.yml.
     if: github.repository == 'cjpais/Handy'
     runs-on: ubuntu-24.04
     steps:

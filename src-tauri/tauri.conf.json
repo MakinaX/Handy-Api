@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Handy Gemini",
-  "version": "0.9.6-gemini.1",
-  "identifier": "computer.handy.gemini",
+  "productName": "Handy API",
+  "mainBinaryName": "handy-api",
+  "version": "0.9.6-api.1",
+  "identifier": "computer.handy.api",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -27,6 +28,8 @@
     "active": true,
     "createUpdaterArtifacts": true,
     "targets": "all",
+    "publisher": "MakinaX",
+    "homepage": "https://github.com/MakinaX/Handy-Api",
     "resources": ["resources/**/*"],
     "license": "MIT",
     "icon": [
@@ -47,7 +50,7 @@
       "deb": {
         "depends": ["libgtk-layer-shell0", "libopenblas0"],
         "files": {
-          "/usr/lib/Handy": "transcribe-libs"
+          "/usr/lib/handy-api": "transcribe-libs"
         }
       },
       "rpm": {
@@ -59,7 +62,7 @@
           "type": "none"
         },
         "files": {
-          "/usr/lib/Handy": "transcribe-libs"
+          "/usr/lib/handy-api": "transcribe-libs"
         }
       },
       "appimage": {
@@ -79,7 +82,7 @@
     "updater": {
       "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY",
       "endpoints": [
-        "https://github.com/MakinaX/Handy-Gemini/releases/latest/download/latest.json"
+        "https://github.com/MakinaX/Handy-Api/releases/latest/download/latest.json"
       ]
     }
   }

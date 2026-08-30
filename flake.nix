@@ -1,5 +1,5 @@
 {
-  description = "Handy - A free, open source, and extensible speech-to-text application that works completely offline";
+  description = "Handy API - extensible local and cloud speech-to-text";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -77,6 +77,20 @@
             ];
           };
           lib = pkgs.lib;
+          cratesIoApiBase = "https://crates.io/api/v1/crates";
+          cratesIoStaticBase = "https://static.crates.io/crates";
+          staticCratesFetchurl = args: pkgs.fetchurl (
+            args
+            // {
+              url = lib.replaceStrings [ cratesIoApiBase ] [ cratesIoStaticBase ] args.url;
+            }
+          );
+          staticCratesImportCargoLock = pkgs.rustPlatform.importCargoLock.override {
+            fetchurl = staticCratesFetchurl;
+          };
+          buildRustPackageWithStaticCrates = pkgs.rustPlatform.buildRustPackage.override {
+            importCargoLock = staticCratesImportCargoLock;
+          };
           combinedAlsaPlugins = pkgs.symlinkJoin {
             name = "combined-alsa-plugins";
             paths = [
@@ -86,8 +100,8 @@
           };
         in
         {
-          handy = pkgs.rustPlatform.buildRustPackage {
-            pname = "handy";
+          "handy-api" = buildRustPackageWithStaticCrates {
+            pname = "handy-api";
             inherit version;
             src = self;
 
@@ -138,6 +152,14 @@
               bunNix = ./.nix/bun.nix;
             };
 
+            # bun2nix cache entries can resolve through read-only Nix-store
+            # symlinks. Copying avoids protected-hardlink failures while
+            # preserving the isolated node_modules layout.
+            bunInstallFlags = [
+              "--linker=isolated"
+              "--backend=copyfile"
+            ];
+
             nativeBuildInputs = with pkgs; [
               cargo-tauri.hook
               pkg-config
@@ -173,15 +195,15 @@
             '';
 
             meta = {
-              description = "A free, open source, and extensible speech-to-text application that works completely offline";
-              homepage = "https://github.com/cjpais/Handy";
+              description = "Extensible local and cloud speech-to-text";
+              homepage = "https://github.com/MakinaX/Handy-Api";
               license = lib.licenses.mit;
-              mainProgram = "handy";
+              mainProgram = "handy-api";
               platforms = supportedSystems;
             };
           };
 
-          default = self.packages.${system}.handy;
+          default = self.packages.${system}."handy-api";
         }
       );
 
@@ -190,7 +212,7 @@
         { lib, pkgs, ... }:
         {
           imports = [ ./nix/module.nix ];
-          programs.handy.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.handy;
+          programs."handy-api".package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}."handy-api";
         };
 
       # Home-manager module for per-user service
@@ -198,7 +220,7 @@
         { lib, pkgs, ... }:
         {
           imports = [ ./nix/hm-module.nix ];
-          services.handy.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.handy;
+          services."handy-api".package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}."handy-api";
         };
 
       # Development shell for building from source
@@ -238,7 +260,7 @@
             XDG_DATA_DIRS = "${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}:${pkgs.hicolor-icon-theme}/share";
 
             shellHook = ''
-              echo "Handy development environment"
+              echo "Handy API development environment"
               bun install
               echo "Run 'bun run tauri dev' to start"
             '';

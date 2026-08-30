@@ -451,9 +451,9 @@ pub fn tray_tooltip() -> String {
 
 fn version_label() -> String {
     if cfg!(debug_assertions) {
-        format!("Handy Gemini v{} (Dev)", env!("CARGO_PKG_VERSION"))
+        format!("Handy API v{} (Dev)", env!("CARGO_PKG_VERSION"))
     } else {
-        format!("Handy Gemini v{}", env!("CARGO_PKG_VERSION"))
+        format!("Handy API v{}", env!("CARGO_PKG_VERSION"))
     }
 }
 

@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build:
-    # Handy Gemini's dedicated CI and upstream-sync workflows own fork builds.
+    # Handy API's dedicated CI and upstream-sync workflows own fork builds.
     # This inherited matrix depends on official Handy signing/packaging identity
     # and must never run in a fork merely because main advanced.
     if: github.repository == 'cjpais/Handy'

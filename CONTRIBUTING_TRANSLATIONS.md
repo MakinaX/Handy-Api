@@ -1,6 +1,6 @@
-# Contributing Translations to Handy
+# Contributing Translations to Handy API
 
-Thank you for helping translate Handy! This guide explains how to add or improve translations.
+Thank you for helping translate Handy API! This guide explains how to add or improve translations.
 
 ## Quick Start
 
@@ -120,7 +120,7 @@ Found a typo or better translation?
 
 ### Don't:
 
-- Translate brand names (Handy, transcribe.cpp, ggml, OpenAI)
+- Translate brand names (Handy API, transcribe.cpp, ggml, OpenAI)
 - Change or remove `{{variables}}`
 - Modify JSON keys
 - Add extra spaces or formatting
@@ -146,8 +146,8 @@ Some languages have complex plural rules. For now, use a general form that works
 
 ## Questions?
 
-- Open an issue on GitHub
-- Join the discussion in existing translation PRs
+- Open a [Handy API issue](https://github.com/MakinaX/Handy-Api/issues)
+- Join the discussion in existing [Handy API translation PRs](https://github.com/MakinaX/Handy-Api/pulls)
 
 ## Currently Supported Languages
 
@@ -171,4 +171,4 @@ We'd love help with:
 
 ---
 
-Thank you for making Handy accessible to more people around the world!
+Thank you for making Handy API accessible to more people around the world!

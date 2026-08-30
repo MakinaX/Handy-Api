@@ -1,4 +1,4 @@
-name: "Handy Gemini Upstream Sync"
+name: "Handy API Upstream Sync"
 
 on:
   schedule:
@@ -10,11 +10,12 @@ permissions:
   contents: write
 
 concurrency:
-  group: handy-gemini-upstream-sync
+  group: handy-api-upstream-sync
   cancel-in-progress: false
 
 jobs:
   prepare-candidate:
+    if: github.repository == 'MakinaX/Handy-Api'
     runs-on: ubuntu-24.04
     outputs:
       update-required: ${{ steps.detect.outputs.update-required }}
@@ -60,15 +61,15 @@ jobs:
           fork_repo_json="$(gh api "repos/${GITHUB_REPOSITORY}")"
           if [[ "$(jq -r '.private' <<<"$fork_repo_json")" != "false" || \
                 "$(jq -r '.visibility' <<<"$fork_repo_json")" != "public" ]]; then
-            echo "Handy Gemini releases require a public GitHub repository" >&2
+            echo "Handy API releases require a public GitHub repository" >&2
             exit 1
           fi
           if [[ "$(jq -r '.default_branch' <<<"$fork_repo_json")" != "main" ]]; then
-            echo "Handy Gemini requires main as the default branch" >&2
+            echo "Handy API requires main as the default branch" >&2
             exit 1
           fi
-          if [[ "$GITHUB_REPOSITORY" != */Handy-Gemini ]]; then
-            echo "Repository must be named Handy-Gemini, got $GITHUB_REPOSITORY" >&2
+          if [[ "$GITHUB_REPOSITORY" != "MakinaX/Handy-Api" ]]; then
+            echo "Repository must be MakinaX/Handy-Api, got $GITHUB_REPOSITORY" >&2
             exit 1
           fi
 
@@ -87,8 +88,9 @@ jobs:
           fi
 
           upstream_version="${upstream_tag#v}"
-          fork_version="${upstream_version}-gemini.1"
+          fork_version="${upstream_version}-api.1"
           release_tag="v${fork_version}"
+          expected_installer="Handy.API_${fork_version}_x64-setup.exe"
 
           git remote add upstream https://github.com/cjpais/Handy.git 2>/dev/null || \
             git remote set-url upstream https://github.com/cjpais/Handy.git
@@ -105,16 +107,15 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" 2>/dev/null
           )"; then
             existing=true
-            if jq -e --arg tag "$release_tag" '
+            if jq -e \
+              --arg tag "$release_tag" \
+              --arg installer "$expected_installer" '
               ([.assets[].name]) as $assets |
-              ($assets | map(select(endswith("-setup.exe")))) as $installers |
               .tag_name == $tag and
               .draft == false and
               .prerelease == false and
-              ($assets | length) == 3 and
-              ($installers | length) == 1 and
-              ($assets | index("latest.json")) != null and
-              ($assets | index(($installers[0] + ".sig"))) != null
+              ($assets | sort) ==
+                ([$installer, ($installer + ".sig"), "latest.json"] | sort)
             ' <<<"$fork_release_json" >/dev/null; then
               published=true
             else
@@ -175,11 +176,11 @@ jobs:
             git ls-remote --heads origin "refs/heads/${candidate_branch}" |
               awk 'NR == 1 { print $1 }'
           )"
-          preserved_updater="$RUNNER_TEMP/handy-gemini-tauri-before-merge.json"
+          preserved_updater="$RUNNER_TEMP/handy-api-tauri-before-merge.json"
           cp src-tauri/tauri.conf.json "$preserved_updater"
 
-          git config user.name "handy-gemini-updater[bot]"
-          git config user.email "handy-gemini-updater[bot]@users.noreply.github.com"
+          git config user.name "handy-api-updater[bot]"
+          git config user.email "handy-api-updater[bot]@users.noreply.github.com"
           git checkout -B "$candidate_branch"
 
           if ! git merge-base --is-ancestor "$UPSTREAM_TAG" HEAD; then
@@ -209,7 +210,7 @@ jobs:
                 exit 1
               fi
 
-              bun scripts/check-handy-gemini-release.ts --resolve-upstream-conflicts
+              bun scripts/check-handy-api-release.ts --resolve-upstream-conflicts
               git add package.json bun.lock src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
               if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
                 echo "Known release-metadata conflicts remain unresolved" >&2
@@ -218,7 +219,7 @@ jobs:
             fi
           fi
 
-          bun scripts/check-handy-gemini-release.ts \
+          bun scripts/check-handy-api-release.ts \
             --set-version "$FORK_VERSION" \
             --preserve-updater-from "$preserved_updater"
 
@@ -230,12 +231,12 @@ jobs:
             --format-version 1 \
             --no-deps >/dev/null
 
-          bun scripts/check-handy-gemini-release.ts
+          bun scripts/check-handy-api-release.ts
           git add -A
           git diff --cached --check
 
           if ! git diff --cached --quiet || git rev-parse -q --verify MERGE_HEAD >/dev/null; then
-            git commit -m "chore: integrate Handy ${UPSTREAM_TAG} into Handy Gemini"
+            git commit -m "chore: integrate Handy ${UPSTREAM_TAG} into Handy API"
           fi
 
           candidate_sha="$(git rev-parse HEAD)"
@@ -255,7 +256,7 @@ jobs:
   candidate-gates:
     needs: prepare-candidate
     if: needs.prepare-candidate.outputs.update-required == 'true'
-    uses: ./.github/workflows/handy-gemini-ci.yml
+    uses: ./.github/workflows/handy-api-ci.yml
     with:
       ref: ${{ needs.prepare-candidate.outputs.candidate-sha }}
 
@@ -278,11 +279,11 @@ jobs:
 
       - name: Reject setup placeholders before release
         run: >-
-          bun scripts/check-handy-gemini-release.ts
+          bun scripts/check-handy-api-release.ts
           --release
           --repository "$GITHUB_REPOSITORY"
 
-  build-signed-windows-x64:
+  build-unsigned-windows-x64:
     needs:
       - prepare-candidate
       - candidate-gates
@@ -296,19 +297,6 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ needs.prepare-candidate.outputs.candidate-sha }}
-
-      - name: Require updater signing secrets
-        shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
-            throw "TAURI_SIGNING_PRIVATE_KEY is not configured"
-          }
-          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
-            throw "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is not configured"
-          }
 
       - name: Enable Windows long paths
         shell: pwsh
@@ -378,17 +366,17 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build signed NSIS updater artifact
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: Build unsigned NSIS updater artifact
         run: >-
           bun run tauri build
+          --config '{"bundle":{"createUpdaterArtifacts":false}}'
           --target x86_64-pc-windows-msvc
           --bundles nsis
           -- --locked
 
-      - name: Verify signed updater output
+      - name: Verify exact unsigned updater output and runtime
+        env:
+          FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -396,20 +384,219 @@ jobs:
           if (-not (Test-Path $bundle)) {
             throw "Target-specific NSIS bundle directory is missing: $bundle"
           }
-          $installers = @(Get-ChildItem $bundle -File -Filter "*-setup.exe")
-          if ($installers.Count -ne 1) {
-            throw "Expected exactly one x64 NSIS setup executable, found $($installers.Count)"
+          $expectedName = "Handy.API_$($env:FORK_VERSION)_x64-setup.exe"
+          $expectedPath = Join-Path $bundle $expectedName
+          $foreignInstallers = @(
+            Get-ChildItem $bundle -File -Filter "*-setup.exe" |
+              Where-Object Name -CNE $expectedName
+          )
+          if ($foreignInstallers.Count -ne 0) {
+            throw "Foreign NSIS setup artifact found: $($foreignInstallers.Name -join ', ')"
           }
-          $installer = $installers[0]
-          $signaturePath = "$($installer.FullName).sig"
-          if (-not (Test-Path $signaturePath) -or (Get-Item $signaturePath).Length -eq 0) {
-            throw "Tauri updater signature is missing or empty"
+          if (-not (Test-Path $expectedPath -PathType Leaf)) {
+            throw "Exact NSIS setup artifact is missing: $expectedName"
+          }
+          $installer = Get-Item $expectedPath
+          if (Get-ChildItem $bundle -File -Filter "*.sig") {
+            throw "Unsigned build unexpectedly emitted an updater signature"
           }
 
-          # Tauri updater keys and signatures are base64-wrapped Minisign boxes.
-          # Decode both and verify the exact bundle with the public key committed
-          # in the tested candidate. The verifier download is version and digest
-          # pinned so this gate cannot silently change underneath a release.
+          # Exercise the shipped package, not the unbundled build output. This
+          # is the x64 NSIS portable-mode smoke used by upstream, adjusted for
+          # the fork's executable identity and target-specific output path.
+          $stagedDlls = @(Get-ChildItem "src-tauri/transcribe-libs" -File -Filter "*.dll")
+          if ($stagedDlls.Count -eq 0) {
+            throw "src-tauri/transcribe-libs contains no staged runtime DLLs"
+          }
+          $installRoot = Join-Path $env:RUNNER_TEMP "handy-api-installed-$([Guid]::NewGuid())"
+          New-Item -ItemType Directory -Path $installRoot | Out-Null
+          try {
+            $install = Start-Process -FilePath $installer.FullName `
+              -ArgumentList @("/S", "/PORTABLE", "/D=$installRoot") `
+              -Wait -PassThru
+            if ($install.ExitCode -ne 0) {
+              throw "Silent NSIS portable install failed with exit code $($install.ExitCode)"
+            }
+
+            $executables = @(Get-ChildItem $installRoot -Recurse -File -Filter "handy-api.exe")
+            if ($executables.Count -ne 1) {
+              throw "Installed package must contain exactly one handy-api.exe; found $($executables.Count)"
+            }
+            $appExe = $executables[0].FullName
+            if (Get-ChildItem $installRoot -Recurse -File -Filter "handy.exe") {
+              throw "Installed package still contains the official handy.exe identity"
+            }
+            $retiredGeminiExecutable = "handy-" + "gemini.exe"
+            if (Get-ChildItem $installRoot -Recurse -File -Filter $retiredGeminiExecutable) {
+              throw "Installed package still contains the retired Gemini-product executable identity"
+            }
+            foreach ($dll in $stagedDlls) {
+              if (-not (Get-ChildItem $installRoot -Recurse -File -Filter $dll.Name)) {
+                throw "Installed package is missing staged runtime DLL $($dll.Name)"
+              }
+            }
+
+            $deviceOutput = (& $appExe --list-devices 2>&1 | Out-String)
+            $deviceOutput | Write-Host
+            if ($LASTEXITCODE -ne 0) {
+              throw "Installed handy-api.exe --list-devices failed"
+            }
+          } finally {
+            if (Test-Path $installRoot) {
+              Remove-Item -Recurse -Force $installRoot
+            }
+          }
+
+          New-Item -ItemType Directory -Path unsigned-assets -Force | Out-Null
+          Copy-Item $installer.FullName unsigned-assets/
+          Get-FileHash $installer.FullName -Algorithm SHA256 | Format-List
+
+      - name: Upload exact unsigned signing input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: handy-api-windows-x64-unsigned-${{ needs.prepare-candidate.outputs.fork-version }}
+          path: unsigned-assets/Handy.API_${{ needs.prepare-candidate.outputs.fork-version }}_x64-setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  sign-windows-updater:
+    needs:
+      - prepare-candidate
+      - candidate-gates
+      - release-contract
+      - build-unsigned-windows-x64
+    if: needs.prepare-candidate.outputs.update-required == 'true'
+    runs-on: windows-latest
+    # This is the first point at which updater signing secrets are available.
+    # The required reviewer approves the tested unsigned candidate before this
+    # job starts. This job never checks out or executes candidate source: it
+    # signs only the exact installer artifact built by the preceding job.
+    environment:
+      name: handy-api-signing
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download exact unsigned signing input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: handy-api-windows-x64-unsigned-${{ needs.prepare-candidate.outputs.fork-version }}
+          path: signing-input
+
+      - name: Verify input and read committed updater public key as data
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ needs.prepare-candidate.outputs.candidate-sha }}
+          FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne "MakinaX/Handy-Api") {
+            throw "Signing is restricted to MakinaX/Handy-Api"
+          }
+          if ($env:CANDIDATE_SHA -notmatch '^[0-9a-f]{40}$') {
+            throw "Candidate SHA is not an exact commit ID"
+          }
+
+          $expectedName = "Handy.API_$($env:FORK_VERSION)_x64-setup.exe"
+          $inputFiles = @(Get-ChildItem signing-input -Recurse -File)
+          if ($inputFiles.Count -ne 1 -or $inputFiles[0].Name -cne $expectedName) {
+            throw "Signing input must contain only $expectedName"
+          }
+
+          $headers = @{
+            Accept = "application/vnd.github+json"
+            Authorization = "Bearer $env:GH_TOKEN"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $configUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/src-tauri/tauri.conf.json?ref=$env:CANDIDATE_SHA"
+          $response = Invoke-RestMethod -Uri $configUri -Headers $headers
+          $configBytes = [Convert]::FromBase64String(($response.content -replace '\s', ''))
+          $config = [Text.Encoding]::UTF8.GetString($configBytes) | ConvertFrom-Json
+          $expectedEndpoint = "https://github.com/MakinaX/Handy-Api/releases/latest/download/latest.json"
+          if ($config.productName -cne "Handy API" -or
+              $config.mainBinaryName -cne "handy-api" -or
+              $config.version -cne $env:FORK_VERSION -or
+              $config.identifier -cne "computer.handy.api" -or
+              $config.plugins.updater.endpoints.Count -ne 1 -or
+              $config.plugins.updater.endpoints[0] -cne $expectedEndpoint) {
+            throw "Candidate updater identity does not match the exact signing contract"
+          }
+          if ([string]::IsNullOrWhiteSpace($config.plugins.updater.pubkey) -or
+              $config.plugins.updater.pubkey -ceq "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY") {
+            throw "Committed updater public key is missing or still a placeholder"
+          }
+          Set-Content -Path (Join-Path $env:RUNNER_TEMP "handy-api-updater-public-key.base64") `
+            -Value $config.plugins.updater.pubkey -NoNewline
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.88.0
+
+      - name: Install trusted Tauri signer without secrets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signerRoot = Join-Path $env:RUNNER_TEMP "trusted-tauri-cli"
+          cargo install tauri-cli --version 2.11.4 --locked --root $signerRoot
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pinned Tauri CLI installation failed"
+          }
+          $signerExe = Join-Path $signerRoot "bin/cargo-tauri.exe"
+          if (-not (Test-Path $signerExe -PathType Leaf)) {
+            throw "Pinned Tauri signer executable is missing"
+          }
+          $signerVersion = (& $signerExe --version | Out-String).Trim()
+          if ($signerVersion -cne "tauri-cli 2.11.4") {
+            throw "Unexpected Tauri signer version: $signerVersion"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "TAURI_SIGNER_EXE=$signerExe"
+
+      - name: Sign exact updater artifact
+        shell: pwsh
+        env:
+          FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "TAURI_SIGNING_PRIVATE_KEY is not configured in handy-api-signing"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            throw "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is not configured in handy-api-signing"
+          }
+          $installer = Join-Path signing-input "Handy.API_$($env:FORK_VERSION)_x64-setup.exe"
+          & $env:TAURI_SIGNER_EXE signer sign $installer
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pinned Tauri updater signing failed"
+          }
+
+      - name: Verify exact signature with committed public key
+        shell: pwsh
+        env:
+          FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedName = "Handy.API_$($env:FORK_VERSION)_x64-setup.exe"
+          $installer = Join-Path signing-input $expectedName
+          $signaturePath = "${installer}.sig"
+          $signedFiles = @(Get-ChildItem signing-input -Recurse -File)
+          if ($signedFiles.Count -ne 2 -or
+              -not (Test-Path $installer -PathType Leaf) -or
+              -not (Test-Path $signaturePath -PathType Leaf) -or
+              (Get-Item $signaturePath).Length -eq 0) {
+            throw "Signed artifact must contain only the exact installer and its non-empty .sig"
+          }
+          $foreignInstallers = @(
+            Get-ChildItem signing-input -Recurse -File -Filter "*-setup.exe" |
+              Where-Object Name -CNE $expectedName
+          )
+          if ($foreignInstallers.Count -ne 0) {
+            throw "Foreign signed installer found: $($foreignInstallers.Name -join ', ')"
+          }
+
           $verifierUrl = "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip"
           $verifierArchive = Join-Path $env:RUNNER_TEMP "minisign-0.12-win64.zip"
           $verifierRoot = Join-Path $env:RUNNER_TEMP "minisign-0.12-win64"
@@ -423,16 +610,11 @@ jobs:
           if ($verifiers.Count -ne 1) {
             throw "Expected exactly one minisign.exe, found $($verifiers.Count)"
           }
-          $verifierExe = $verifiers[0].FullName
 
-          $tauriConfig = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
-          $publicKeyBase64 = $tauriConfig.plugins.updater.pubkey
-          if ([string]::IsNullOrWhiteSpace($publicKeyBase64) -or
-              $publicKeyBase64 -eq "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY") {
-            throw "Committed updater public key is missing or still a placeholder"
-          }
-          $publicKeyPath = Join-Path $env:RUNNER_TEMP "handy-gemini-updater.pub"
-          $decodedSignaturePath = Join-Path $env:RUNNER_TEMP "handy-gemini-installer.minisig"
+          $publicKeyBase64 = Get-Content `
+            (Join-Path $env:RUNNER_TEMP "handy-api-updater-public-key.base64") -Raw
+          $publicKeyPath = Join-Path $env:RUNNER_TEMP "handy-api-updater.pub"
+          $decodedSignaturePath = Join-Path $env:RUNNER_TEMP "handy-api-installer.minisig"
           try {
             [IO.File]::WriteAllBytes(
               $publicKeyPath,
@@ -443,66 +625,27 @@ jobs:
               [Convert]::FromBase64String((Get-Content $signaturePath -Raw).Trim())
             )
           } catch {
-            throw "Updater public key or signature is not valid base64: $($_.Exception.Message)"
+            throw "Updater public key or signature is not valid base64"
           }
 
-          & $verifierExe -Vm $installer.FullName -p $publicKeyPath -x $decodedSignaturePath
+          $verifierExe = $verifiers[0].FullName
+          & $verifierExe -Vm $installer -p $publicKeyPath -x $decodedSignaturePath
           if ($LASTEXITCODE -ne 0) {
             throw "Cryptographic updater signature verification failed"
           }
 
-          # Exercise the shipped package, not the unbundled build output. This
-          # is the x64 NSIS portable-mode smoke used by upstream, adjusted for
-          # the fork's executable identity and target-specific output path.
-          $stagedDlls = @(Get-ChildItem "src-tauri/transcribe-libs" -File -Filter "*.dll")
-          if ($stagedDlls.Count -eq 0) {
-            throw "src-tauri/transcribe-libs contains no staged runtime DLLs"
-          }
-          $installRoot = Join-Path $env:RUNNER_TEMP "handy-gemini-installed-$([Guid]::NewGuid())"
-          New-Item -ItemType Directory -Path $installRoot | Out-Null
-          try {
-            $install = Start-Process -FilePath $installer.FullName `
-              -ArgumentList @("/S", "/PORTABLE", "/D=$installRoot") `
-              -Wait -PassThru
-            if ($install.ExitCode -ne 0) {
-              throw "Silent NSIS portable install failed with exit code $($install.ExitCode)"
-            }
+          New-Item -ItemType Directory -Path signed-assets -Force | Out-Null
+          Copy-Item $installer signed-assets/
+          Copy-Item $signaturePath signed-assets/
+          Get-FileHash $installer, $signaturePath -Algorithm SHA256 | Format-List
 
-            $executables = @(Get-ChildItem $installRoot -Recurse -File -Filter "handy-gemini.exe")
-            if ($executables.Count -ne 1) {
-              throw "Installed package must contain exactly one handy-gemini.exe; found $($executables.Count)"
-            }
-            $appExe = $executables[0].FullName
-            if (Get-ChildItem $installRoot -Recurse -File -Filter "handy.exe") {
-              throw "Installed package still contains the official handy.exe identity"
-            }
-            foreach ($dll in $stagedDlls) {
-              if (-not (Get-ChildItem $installRoot -Recurse -File -Filter $dll.Name)) {
-                throw "Installed package is missing staged runtime DLL $($dll.Name)"
-              }
-            }
-
-            $deviceOutput = (& $appExe --list-devices 2>&1 | Out-String)
-            $deviceOutput | Write-Host
-            if ($LASTEXITCODE -ne 0) {
-              throw "Installed handy-gemini.exe --list-devices failed"
-            }
-          } finally {
-            if (Test-Path $installRoot) {
-              Remove-Item -Recurse -Force $installRoot
-            }
-          }
-
-          New-Item -ItemType Directory -Path release-assets -Force | Out-Null
-          Copy-Item $installer.FullName release-assets/
-          Copy-Item $signaturePath release-assets/
-          Get-FileHash $installer.FullName -Algorithm SHA256 | Format-List
-
-      - name: Upload verified release inputs
+      - name: Upload exact signed acceptance artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: handy-gemini-windows-x64-${{ needs.prepare-candidate.outputs.fork-version }}
-          path: release-assets/*
+          name: handy-api-windows-x64-signed-${{ needs.prepare-candidate.outputs.fork-version }}
+          path: |
+            signed-assets/Handy.API_${{ needs.prepare-candidate.outputs.fork-version }}_x64-setup.exe
+            signed-assets/Handy.API_${{ needs.prepare-candidate.outputs.fork-version }}_x64-setup.exe.sig
           if-no-files-found: error
           retention-days: 14
 
@@ -511,15 +654,15 @@ jobs:
       - prepare-candidate
       - candidate-gates
       - release-contract
-      - build-signed-windows-x64
+      - sign-windows-updater
     if: needs.prepare-candidate.outputs.update-required == 'true'
     runs-on: ubuntu-24.04
-    # The one-time setup makes this a required-reviewer environment. The exact
-    # signed artifact from the preceding job is manually accepted on Windows
-    # while this job waits; no draft, tag, main update, or public release exists
-    # until the Director approves that deployment.
+    # This is the second required-reviewer boundary. The signing environment
+    # approved only key use; the exact signed artifact is manually accepted on
+    # Windows while this job waits. No draft, tag, main update, or public release
+    # exists until the Director separately approves production publication.
     environment:
-      name: handy-gemini-production
+      name: handy-api-production
     permissions:
       actions: read
       contents: write
@@ -533,7 +676,7 @@ jobs:
       - name: Download verified release inputs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: handy-gemini-windows-x64-${{ needs.prepare-candidate.outputs.fork-version }}
+          name: handy-api-windows-x64-signed-${{ needs.prepare-candidate.outputs.fork-version }}
           path: release-assets
 
       - name: Build and verify updater manifest
@@ -544,21 +687,35 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          installers=(release-assets/*-setup.exe)
-          if [[ ${#installers[@]} -ne 1 ]]; then
-            echo "Expected exactly one NSIS installer" >&2
+          expected_name="Handy.API_${FORK_VERSION}_x64-setup.exe"
+          installer="release-assets/${expected_name}"
+          foreign_installers=(release-assets/*-setup.exe)
+          if [[ ${#foreign_installers[@]} -ne 1 ]]; then
+            echo "Expected one NSIS setup artifact, found ${#foreign_installers[@]}" >&2
             exit 1
           fi
-          installer="${installers[0]}"
+          if [[ "$(basename "${foreign_installers[0]}")" != "$expected_name" || \
+                ! -f "$installer" ]]; then
+            echo "Expected only exact NSIS installer $expected_name" >&2
+            exit 1
+          fi
           signature_file="${installer}.sig"
           if [[ ! -s "$signature_file" ]]; then
             echo "Missing updater signature for $installer" >&2
             exit 1
           fi
+          signing_inputs=(release-assets/*)
+          if [[ ${#signing_inputs[@]} -ne 2 ]]; then
+            echo "Signed release input must contain exactly installer and signature" >&2
+            exit 1
+          fi
 
-          signature="$(cat "$signature_file")"
-          filename="$(basename "$installer")"
-          encoded_filename="$(node -p 'encodeURIComponent(process.argv[1])' "$filename")"
+          signature="$(tr -d '\r\n' <"$signature_file")"
+          if [[ -z "$signature" ]]; then
+            echo "Updater signature is empty after normalization" >&2
+            exit 1
+          fi
+          encoded_filename="$(node -p 'encodeURIComponent(process.argv[1])' "$expected_name")"
           asset_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${encoded_filename}"
           pub_date="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
@@ -569,7 +726,7 @@ jobs:
             --arg url "$asset_url" \
             '{
               version: $version,
-              notes: "Automated Handy Gemini stable upstream integration.",
+              notes: "Automated Handy API stable upstream integration.",
               pub_date: $pub_date,
               platforms: {
                 "windows-x86_64": { signature: $signature, url: $url },
@@ -589,6 +746,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ needs.prepare-candidate.outputs.candidate-sha }}
+          FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
           RELEASE_TAG: ${{ needs.prepare-candidate.outputs.release-tag }}
           UPSTREAM_TAG: ${{ needs.prepare-candidate.outputs.upstream-tag }}
         shell: bash
@@ -607,11 +765,13 @@ jobs:
           gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$CANDIDATE_SHA" \
-            --title "Handy Gemini ${RELEASE_TAG#v}" \
+            --title "Handy API ${RELEASE_TAG#v}" \
             --notes "Automated integration of upstream Handy ${UPSTREAM_TAG}." \
             --draft
           gh release upload "$RELEASE_TAG" \
-            release-assets/* \
+            "release-assets/Handy.API_${FORK_VERSION}_x64-setup.exe" \
+            "release-assets/Handy.API_${FORK_VERSION}_x64-setup.exe.sig" \
+            release-assets/latest.json \
             --repo "$GITHUB_REPOSITORY"
 
       - name: Verify draft inventory and uploaded bytes
@@ -623,24 +783,24 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          expected_name="Handy.API_${FORK_VERSION}_x64-setup.exe"
 
           release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
-          if ! jq -e --arg tag "$RELEASE_TAG" '
+          if ! jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --arg installer "$expected_name" '
             ([.assets[].name]) as $assets |
-            ($assets | map(select(endswith("-setup.exe")))) as $installers |
             .tag_name == $tag and
             .draft == true and
             .prerelease == false and
-            ($assets | length) == 3 and
-            ($installers | length) == 1 and
-            ($assets | index("latest.json")) != null and
-            ($assets | index(($installers[0] + ".sig"))) != null
+            ($assets | sort) ==
+              ([$installer, ($installer + ".sig"), "latest.json"] | sort)
           ' <<<"$release_json" >/dev/null; then
             echo "Draft release does not have the exact installer/signature/manifest inventory" >&2
             exit 1
           fi
 
-          uploaded_dir="$RUNNER_TEMP/handy-gemini-uploaded-assets"
+          uploaded_dir="$RUNNER_TEMP/handy-api-uploaded-assets"
           mkdir -p "$uploaded_dir"
           gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
@@ -660,10 +820,8 @@ jobs:
             fi
           done
 
-          installers=(release-assets/*-setup.exe)
-          installer="${installers[0]}"
-          filename="$(basename "$installer")"
-          encoded_filename="$(node -p 'encodeURIComponent(process.argv[1])' "$filename")"
+          installer="release-assets/${expected_name}"
+          encoded_filename="$(node -p 'encodeURIComponent(process.argv[1])' "$expected_name")"
           expected_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${encoded_filename}"
           signature="$(tr -d '\r\n' <"${installer}.sig")"
           jq -e \
@@ -681,6 +839,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ needs.prepare-candidate.outputs.candidate-sha }}
+          FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
           RELEASE_TAG: ${{ needs.prepare-candidate.outputs.release-tag }}
         shell: bash
         run: |
@@ -701,5 +860,15 @@ jobs:
             --latest
 
           final_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
-          jq -e '.draft == false and .prerelease == false and (.assets | length) == 3' \
+          expected_name="Handy.API_${FORK_VERSION}_x64-setup.exe"
+          jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --arg installer "$expected_name" '
+              ([.assets[].name]) as $assets |
+              .tag_name == $tag and
+              .draft == false and
+              .prerelease == false and
+              ($assets | sort) ==
+                ([$installer, ($installer + ".sig"), "latest.json"] | sort)
+            ' \
             <<<"$final_json" >/dev/null
