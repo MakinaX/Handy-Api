@@ -14,10 +14,10 @@ standard. A Windows artifact has not been built, and the live Gemini, physical
 microphone, cursor-paste, Credential Manager, installer-isolation, and updater
 paths have not been exercised on Windows.
 
-Release mode deliberately remains fail-closed until the Director supplies the
-unavoidable public repository identity, a dedicated Tauri updater keypair, and
-the protected publication environment. The exact one-time procedure is in
-`Docs/HANDY-GEMINI-ONE-TIME-SETUP.md`.
+The public repository identity is now bound to `MakinaX/Handy-Gemini`. Release
+mode deliberately remains fail-closed until the Director supplies a dedicated
+Tauri updater keypair and the protected publication environment. The exact
+one-time procedure is in `Docs/HANDY-GEMINI-ONE-TIME-SETUP.md`.
 
 ## Fresh baseline and adopted upstream work
 
@@ -118,39 +118,41 @@ the protected publication environment. The exact one-time procedure is in
 
 ## Verification record
 
-| Check                                           | Result               | Evidence / limitation                                                  |
-| ----------------------------------------------- | -------------------- | ---------------------------------------------------------------------- |
-| Frozen Bun dependency install                   | PASS                 | `bun install --frozen-lockfile`                                        |
-| Translation parity                              | PASS                 | 452 keys; all 23 non-English locales complete                          |
-| ESLint                                          | PASS                 | full `eslint src`                                                      |
-| Prettier                                        | PASS                 | full repository check                                                  |
-| TypeScript + production Vite build              | PASS                 | 2,117 modules; only inherited large-chunk warnings                     |
-| Portable updater unit assertions                | PASS                 | all assertions passed                                                  |
-| Playwright                                      | PASS                 | 2/2 tests in Playwright 1.58.0 Noble container                         |
-| Workflow YAML parse                             | PASS                 | both fork workflows parsed                                             |
-| Release contract, scaffold mode                 | PASS                 | `0.9.6-gemini.1`, placeholders allowed                                 |
-| Release contract, release mode                  | EXPECTED FAIL-CLOSED | only GitHub owner and updater-public-key placeholders remain           |
-| Rustfmt                                         | PASS                 | Rust 1.88 toolchain, all targets                                       |
-| Pure speech-guard regression suite              | PASS                 | 13/13 deterministic tests                                              |
-| Static P0/P1 Rust integration audit             | PASS                 | no remaining static blocker after final caller/state review            |
-| Locked Rust tests, Linux target                 | PASS                 | `cargo test --locked`; 261 passed, 0 failed; Windows cfg not compiled  |
-| Clippy defect groups, Linux target              | PASS                 | all targets; correctness/suspicious/perf denied; style debt allowed    |
-| Windows x64 compile/package                     | NOT EXECUTED         | requires native `windows-latest` workflow run                          |
-| Actual Local model load/transcription           | NOT EXECUTED         | no model/runtime acceptance corpus in this host session                |
-| Actual Silero + real WAV/noise/utterance corpus | NOT VALIDATED        | current deterministic guard tests synthesize evidence/signals          |
-| Repeated Whisper hallucination runs             | NOT VALIDATED        | local model/runtime corpus unavailable in this host session            |
-| Live Gemini acceptance corpus                   | NOT EXECUTED         | Gemini API key is unavailable                                          |
-| Windows F1/ESC/paste/history/manual matrix      | NOT EXECUTED         | no Windows runtime/runner in the local environment                     |
-| Windows migration/Credential Manager            | NOT EXECUTED         | Windows app-data and credential APIs unavailable locally               |
-| Windows installer/runtime/update retention      | NOT EXECUTED         | fork repository, updater keys, and Windows Actions run are unavailable |
+| Check                                           | Result               | Evidence / limitation                                                 |
+| ----------------------------------------------- | -------------------- | --------------------------------------------------------------------- |
+| Frozen Bun dependency install                   | PASS                 | `bun install --frozen-lockfile`                                       |
+| Translation parity                              | PASS                 | 452 keys; all 23 non-English locales complete                         |
+| ESLint                                          | PASS                 | full `eslint src`                                                     |
+| Prettier                                        | PASS                 | full repository check                                                 |
+| TypeScript + production Vite build              | PASS                 | 2,117 modules; only inherited large-chunk warnings                    |
+| Portable updater unit assertions                | PASS                 | all assertions passed                                                 |
+| Playwright                                      | PASS                 | 2/2 tests in Playwright 1.58.0 Noble container                        |
+| Workflow YAML parse                             | PASS                 | both fork workflows parsed                                            |
+| Release contract, scaffold mode                 | PASS                 | `0.9.6-gemini.1`, placeholders allowed                                |
+| Release contract, release mode                  | EXPECTED FAIL-CLOSED | only the updater-public-key placeholder remains                       |
+| Rustfmt                                         | PASS                 | Rust 1.88 toolchain, all targets                                      |
+| Pure speech-guard regression suite              | PASS                 | 13/13 deterministic tests                                             |
+| Static P0/P1 Rust integration audit             | PASS                 | no remaining static blocker after final caller/state review           |
+| Locked Rust tests, Linux target                 | PASS                 | `cargo test --locked`; 261 passed, 0 failed; Windows cfg not compiled |
+| Clippy defect groups, Linux target              | PASS                 | all targets; correctness/suspicious/perf denied; style debt allowed   |
+| Windows x64 compile/package                     | NOT EXECUTED         | requires native `windows-latest` workflow run                         |
+| Actual Local model load/transcription           | NOT EXECUTED         | no model/runtime acceptance corpus in this host session               |
+| Actual Silero + real WAV/noise/utterance corpus | NOT VALIDATED        | current deterministic guard tests synthesize evidence/signals         |
+| Repeated Whisper hallucination runs             | NOT VALIDATED        | local model/runtime corpus unavailable in this host session           |
+| Live Gemini acceptance corpus                   | NOT EXECUTED         | Gemini API key is unavailable                                         |
+| Windows F1/ESC/paste/history/manual matrix      | NOT EXECUTED         | no Windows runtime/runner in the local environment                    |
+| Windows migration/Credential Manager            | NOT EXECUTED         | Windows app-data and credential APIs unavailable locally              |
+| Windows installer/runtime/update retention      | NOT EXECUTED         | updater keys and Windows Actions run are unavailable                  |
 
 ## External capability state
 
 - GitHub CLI/authentication: unavailable/unset.
-- GitHub fork repository: not created; current `origin` still identifies
-  official `cjpais/Handy` and must not be used as the push destination.
+- Public fork repository: `MakinaX/Handy-Gemini`, verified public and configured
+  as `origin`; it remains empty until an authenticated initial push succeeds.
+- Official `cjpais/Handy`: retained as fetch-only `upstream` with push disabled.
 - Tauri updater private key/password: unset.
-- Fork updater public key and GitHub owner: intentional placeholders.
+- Fork GitHub owner: bound to `MakinaX`; updater public key: intentional
+  fail-closed placeholder.
 - Windows Authenticode identity: not configured. Tauri updater signatures are
   separate; the first personal installer may display Unknown Publisher.
 - Local Windows build capability: unavailable on this x86_64 Linux
@@ -160,8 +162,8 @@ No credential values were read, logged, or added to the repository.
 
 ## Required closure before calling the fork complete
 
-1. Perform the one-time public repository, updater-key, and protected
-   publication-environment setup.
+1. Complete the authenticated initial push, updater-key, workflow-permission,
+   and protected publication-environment setup.
 2. Run `handy-gemini-ci.yml`, then run the upstream-sync workflow until its
    `publish-release` job is waiting for Director approval.
 3. Download that run's exact signed Windows x64 artifact, install it alongside
