@@ -890,6 +890,55 @@ jobs:
           }
           Add-Content -Path $env:GITHUB_ENV -Value "TAURI_SIGNER_EXE=$signerExe"
 
+      - name: Prepare pinned x64 Minisign verifier without secrets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ARCH -cne "X64") {
+            throw "Updater verification requires the x64 Windows runner"
+          }
+          $verifierUrl = "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip"
+          $verifierArchive = Join-Path $env:RUNNER_TEMP "minisign-0.12-win64.zip"
+          $verifierRoot = Join-Path $env:RUNNER_TEMP "minisign-0.12-win64-preflight"
+          if ((Test-Path -LiteralPath $verifierArchive) -or
+              (Test-Path -LiteralPath $verifierRoot)) {
+            throw "Pinned Minisign verifier staging path is not fresh"
+          }
+          Invoke-WebRequest -Uri $verifierUrl -OutFile $verifierArchive
+          $verifierHash = (Get-FileHash -LiteralPath $verifierArchive `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($verifierHash -ne "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479") {
+            throw "Pinned Minisign verifier archive digest mismatch"
+          }
+          Expand-Archive -LiteralPath $verifierArchive `
+            -DestinationPath $verifierRoot
+          $expectedVerifierPaths = @(
+            "minisign-win64/aarch64/minisign.exe",
+            "minisign-win64/x86_64/minisign.exe"
+          ) | Sort-Object -CaseSensitive
+          $actualVerifierPaths = @(
+            Get-ChildItem $verifierRoot -Recurse -File -Filter "minisign.exe" |
+              ForEach-Object {
+                [IO.Path]::GetRelativePath($verifierRoot, $_.FullName).Replace('\', '/')
+              }
+          ) | Sort-Object -CaseSensitive
+          if ($actualVerifierPaths.Count -ne $expectedVerifierPaths.Count -or
+              [string]::Join("`n", $actualVerifierPaths) -cne
+                [string]::Join("`n", $expectedVerifierPaths)) {
+            throw "Pinned Minisign verifier inventory is not exact"
+          }
+          $verifierExe = Join-Path $verifierRoot `
+            "minisign-win64/x86_64/minisign.exe"
+          if (-not (Test-Path -LiteralPath $verifierExe -PathType Leaf) -or
+              ((Get-Item -LiteralPath $verifierExe).Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Pinned x86_64 Minisign verifier is missing or unsafe"
+          }
+          $verifierVersion = (& $verifierExe -v | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $verifierVersion -cne "minisign 0.12") {
+            throw "Pinned x86_64 Minisign verifier cannot execute exactly"
+          }
+
       - name: Sign exact updater artifact
         shell: pwsh
         env:
@@ -955,6 +1004,9 @@ jobs:
           FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ARCH -cne "X64") {
+            throw "Updater verification requires the x64 Windows runner"
+          }
           $expectedName = "Handy.API_$($env:FORK_VERSION)_x64-setup.exe"
           $installer = Join-Path signing-input $expectedName
           $signaturePath = "${installer}.sig"
@@ -996,18 +1048,42 @@ jobs:
             throw "Installer byte invariance evidence does not match the unsigned receipt"
           }
 
-          $verifierUrl = "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip"
           $verifierArchive = Join-Path $env:RUNNER_TEMP "minisign-0.12-win64.zip"
-          $verifierRoot = Join-Path $env:RUNNER_TEMP "minisign-0.12-win64"
-          Invoke-WebRequest -Uri $verifierUrl -OutFile $verifierArchive
-          $verifierHash = (Get-FileHash $verifierArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $verifierRoot = Join-Path $env:RUNNER_TEMP "minisign-0.12-win64-verify"
+          if (-not (Test-Path -LiteralPath $verifierArchive -PathType Leaf) -or
+              ((Get-Item -LiteralPath $verifierArchive).Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+              (Test-Path -LiteralPath $verifierRoot)) {
+            throw "Prepared Minisign verifier archive is missing or unsafe"
+          }
+          $verifierHash = (Get-FileHash -LiteralPath $verifierArchive `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($verifierHash -ne "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479") {
             throw "Pinned Minisign verifier archive digest mismatch"
           }
-          Expand-Archive -Path $verifierArchive -DestinationPath $verifierRoot -Force
-          $verifiers = @(Get-ChildItem $verifierRoot -Recurse -File -Filter "minisign.exe")
-          if ($verifiers.Count -ne 1) {
-            throw "Expected exactly one minisign.exe, found $($verifiers.Count)"
+          Expand-Archive -LiteralPath $verifierArchive `
+            -DestinationPath $verifierRoot
+          $expectedVerifierPaths = @(
+            "minisign-win64/aarch64/minisign.exe",
+            "minisign-win64/x86_64/minisign.exe"
+          ) | Sort-Object -CaseSensitive
+          $actualVerifierPaths = @(
+            Get-ChildItem $verifierRoot -Recurse -File -Filter "minisign.exe" |
+              ForEach-Object {
+                [IO.Path]::GetRelativePath($verifierRoot, $_.FullName).Replace('\', '/')
+              }
+          ) | Sort-Object -CaseSensitive
+          if ($actualVerifierPaths.Count -ne $expectedVerifierPaths.Count -or
+              [string]::Join("`n", $actualVerifierPaths) -cne
+                [string]::Join("`n", $expectedVerifierPaths)) {
+            throw "Pinned Minisign verifier inventory is not exact"
+          }
+          $verifierExe = Join-Path $verifierRoot `
+            "minisign-win64/x86_64/minisign.exe"
+          if (-not (Test-Path -LiteralPath $verifierExe -PathType Leaf) -or
+              ((Get-Item -LiteralPath $verifierExe).Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Pinned x86_64 Minisign verifier is missing or unsafe"
           }
 
           $publicKeyBase64 = Get-Content `
@@ -1027,7 +1103,6 @@ jobs:
             throw "Updater public key or signature is not valid base64"
           }
 
-          $verifierExe = $verifiers[0].FullName
           & $verifierExe -Vm $installer -p $publicKeyPath -x $decodedSignaturePath
           if ($LASTEXITCODE -ne 0) {
             throw "Cryptographic updater signature verification failed"

@@ -11,6 +11,10 @@ Target: physical Windows 10/11 x64 system
 Rule: leave every item unchecked until its evidence is attached. A build or
 unit-test pass alone is not acceptance.
 
+Failed run `33354201384` is diagnostic evidence only: it performed no
+cryptographic signature verification and produced no signed artifact or
+signing receipt. It is not eligible for this acceptance matrix.
+
 ## Evidence rules
 
 Keep Actions evidence separate from public release assets and require these

@@ -13,10 +13,13 @@ phase, public-key binding, protected-environment setup, environment-scoped
 secret registration, and initial push are complete. Treat the corresponding
 commands below as recovery/read-back instructions: do not regenerate the
 keypair or repeat secret mutations without a new, specific authorization. The
-current closure attempt must stop before approving `handy-api-signing`.
-Superseded upstream-sync run `33308322090` was cancelled without approval
-because its unsigned installer predates the durable receipt and signer
-byte-invariance gates. Its queued old-source successor was cancelled first.
+receipt-hardened run `33354201384` received one signing approval, but it failed
+closed before cryptographic verification because the pinned Minisign archive
+contains separate aarch64 and x86_64 executables. It produced no signed
+artifact or signing receipt, never entered production, and must not be rerun.
+The next full run must use the committed exact-x64 verifier fix, repeat the
+unsigned Director read-back with fresh artifact identities and hashes, and stop
+at a new unapproved `handy-api-signing` gate.
 
 ## 1. Verify authentication and the safe remote layout
 
@@ -194,9 +197,11 @@ fi
 Do not register either value as a repository secret or under
 `handy-api-production`. The candidate build produces and runtime-smokes the
 exact unsigned NSIS installer with no signing-secret context. Only after the
-first human approval does the no-checkout signer job use pinned Tauri CLI
-2.11.4 to generate `.sig`; a separate secret-free step decodes the committed
-public key and cryptographically verifies that exact installer.
+first human approval does the no-checkout signer job start; it validates the
+receipt/input and preflights the pinned x64 Minisign verifier without secrets
+before pinned Tauri CLI 2.11.4 receives the signing secrets and generates
+`.sig`. A separate secret-free step then decodes the committed public key and
+cryptographically verifies that exact installer.
 
 ## 4. Run the fail-closed gates, then publish only when authorized
 
@@ -208,9 +213,8 @@ bun scripts/check-handy-api-release.ts \
 ```
 
 After adding only the public key, release mode must pass. For the current
-blocked-run transition, validate the receipt rootfix locally, but do not commit
-or push it until the cancellation subsection below has passed and its durable
-receipt can be included in the same commit:
+Minisign verifier rootfix, validate the exact workflow and receipt contracts
+locally before creating its commit:
 
 ```bash
 bun scripts/check-handy-api-release.ts \
@@ -220,61 +224,52 @@ bun scripts/handy-api-receipt-contract.test.ts
 git diff --check
 ```
 
-### Completed replacement of the blocked old-source runs
+### Current failed run and exact-x64 verifier transition
 
-The current transition has two runs bound to workflow source commit
-`62c4947a36d3774527042da2776ff66d047002cd`:
+Receipt-rootfix commit `47a0407a1eb5851b5f6819f5d1400a4cb937e573`
+was pushed, and exact push CI run `33351528982` passed. Upstream-sync run
+`33354201384` then proved the candidate gates, unsigned Windows runtime smoke,
+separate unsigned EXE/receipt artifacts, Director read-back, signer-side
+receipt/input validation, and pre/post installer byte invariance. The Director
+approved only `handy-api-signing` for that run. Tauri created the updater
+signature, but the following secret-free verification step stopped before the
+Minisign command because it recursively found both architecture executables and
+incorrectly required a count of one.
 
-- manually dispatched run `33308322090` reached `handy-api-signing` but was
-  never approved. It was cancelled `completed/cancelled` with no signer runner,
-  steps, secret access, or signing command.
-- scheduled run `33340123965` was pending behind the same concurrency group and
-  had not started any job. Because `cancel-in-progress: false`, it was cancelled
-  **first**, then read back as `completed/cancelled` with zero jobs, approvals,
-  or artifacts.
+The failed run is terminal evidence, not reusable release input. Its
+cryptographic signature verification status is `NOT_EXECUTED`; signed artifact
+and signing-receipt counts are zero; production was skipped; and tag/release
+counts are zero. The exact evidence is in
+`Docs/HANDY-API-MINISIGN-ROOTFIX-RECEIPT.json`. Earlier old-source cancellations
+remain recorded separately in `Docs/HANDY-API-SIGNING-ROOTFIX-RECEIPT.json`.
 
-The receipt rootfix was prepared and locally validated before either
-cancellation. Both GitHub mutations were performed from the trusted,
-authenticated Director machine in this exact order:
-
-```bash
-# Historical completed sequence; do not rerun these cancellation commands.
-gh run cancel 33340123965 --repo "$fork_repo"
-gh run view 33340123965 --repo "$fork_repo" \
-  --json status,conclusion,headSha,url
-
-gh run cancel 33308322090 --repo "$fork_repo"
-gh run view 33308322090 --repo "$fork_repo" \
-  --json status,conclusion,headSha,url
-```
-
-Those read-backs passed. The workflow-run approval history, jobs, artifacts,
-production deployments, Git tags, and releases were rechecked afterward. For
-`33308322090`, the retained facts are zero signing approvals, signer steps,
-signing-secret access, signing commands, production runners/steps/deployments,
-tags, and releases. Both cancellations and those retained facts are recorded
-in `Docs/HANDY-API-SIGNING-ROOTFIX-RECEIPT.json`. The exact validated rootfix may
-now be committed and pushed:
+The minimal verifier fix requires the pinned archive's exact two-architecture
+Minisign executable inventory, requires an x64 signing runner, selects only
+`minisign-win64/x86_64/minisign.exe` by literal path, rejects a reparse point,
+executes its `-v` loader/version check with exact output `minisign 0.12`, and
+completes that preflight before the secret-bearing signing step. After signing,
+the secret-free verifier re-hashes the prepared archive, expands it into a
+fresh directory, repeats the exact inventory/path safety gates, and only then
+invokes that exact binary for cryptographic verification. The fix may now be
+committed locally after all checks pass:
 
 ```bash
 git add -- \
-  .github/workflows/handy-api-ci.yml \
   .github/workflows/upstream-sync.yml \
   Docs/HANDY-API-IMPLEMENTATION-REPORT.md \
+  Docs/HANDY-API-MINISIGN-ROOTFIX-RECEIPT.json \
   Docs/HANDY-API-ONE-TIME-SETUP.md \
-  Docs/HANDY-API-SIGNING-ROOTFIX-RECEIPT.json \
   Docs/HANDY-API-WINDOWS-ACCEPTANCE.md \
-  scripts/check-handy-api-release.ts \
-  scripts/handy-api-receipt-contract.test.ts \
-  scripts/handy-api-receipt-contract.ts
+  scripts/check-handy-api-release.ts
 git diff --cached --check
-git commit -m "fix: bind updater signing to durable receipts"
-closure_sha="$(git rev-parse HEAD)"
+git commit -m "fix: select x64 Minisign verifier"
+verifier_fix_sha="$(git rev-parse HEAD)"
 git push origin HEAD:main
 ```
 
-Read back the exact remote `main` SHA and wait for its push-owned
-`handy-api-ci.yml` run before dispatching a replacement upstream-sync run.
+Do not rerun `33354201384`; rerun preserves its bad committed workflow. Read
+back the exact new remote `main` SHA and wait for its push-owned
+`handy-api-ci.yml` run before dispatching one wholly new upstream-sync run.
 
 The initial `main` push starts `handy-api-ci.yml` automatically. Do not dispatch
 a duplicate manual run: both runs share a cancellation-enabled concurrency
@@ -287,7 +282,7 @@ ci_run_id="$(gh run list \
   --workflow handy-api-ci.yml \
   --branch main \
   --event push \
-  --commit "$closure_sha" \
+  --commit "$verifier_fix_sha" \
   --limit 1 \
   --json databaseId \
   --jq '.[0].databaseId')"
@@ -296,7 +291,7 @@ test -n "$ci_run_id"
 test "$(gh run view "$ci_run_id" \
   --repo "$fork_repo" \
   --json headSha \
-  --jq .headSha)" = "$closure_sha"
+  --jq .headSha)" = "$verifier_fix_sha"
 gh run watch "$ci_run_id" --repo "$fork_repo" --exit-status
 ```
 
@@ -316,11 +311,12 @@ gh run list \
 gh workflow run upstream-sync.yml --repo "$fork_repo" --ref main
 ```
 
-Open that run in GitHub Actions. First wait for the unsigned Windows build and
+Open the new run in GitHub Actions. First wait for the unsigned Windows build and
 all frontend, Rust, Nix, and release-contract gates to pass. The build must
 upload both the exact unsigned input and its separate durable receipt. Stop at
-the unapproved `handy-api-signing` gate for the currently authorized phase.
-Do not approve signing merely because the workflow reached that gate.
+the new unapproved `handy-api-signing` gate. Do not reuse any artifact ID, hash,
+receipt, or approval from `33354201384`, and do not approve signing merely
+because the workflow reached that gate.
 
 The Actions and public-release inventories are disjoint and exact:
 
@@ -353,13 +349,19 @@ After a separate future authorization, the isolated signer revalidates the
 same receipt and EXE before its signing command. Immediately before and after
 Tauri signing it measures the installer SHA-256 and byte size and requires both
 pairs to be identical. The command may add exactly one non-empty `.sig` and may
-not alter the EXE or add any other file. A secret-free step then verifies the
-signature with the committed public key. Only after that verification does the
-workflow upload the exact two-file signed artifact and create the separate
-signing receipt. That receipt binds the signed artifact name, ID, and archive
-digest; the unsigned receipt artifact name, ID, archive digest, filename, and
-JSON SHA-256; the equal pre/post installer hashes and installer size; and the
-signature filename/hash, with both verification booleans true.
+not alter the EXE or add any other file. Before this secret-bearing command, a
+secret-free preflight already requires the pinned Minisign archive digest and
+exact aarch64/x86_64 executable inventory, selects the literal x86_64 path on
+the required x64 runner, rejects a reparse point, and invokes its exact 0.12
+version mode. After signing, another secret-free step re-hashes the same
+archive, expands it into a fresh directory, repeats those gates, and verifies
+the signature with the committed public key.
+Only after that verification does the workflow upload the exact two-file signed
+artifact and create the separate signing receipt. That receipt binds the signed
+artifact name, ID, and archive digest; the unsigned receipt artifact name, ID,
+archive digest, filename, and JSON SHA-256; the equal pre/post installer hashes
+and installer size; and the signature filename/hash, with both verification
+booleans true.
 
 After the isolated signer succeeds, `publish-release` waits on the independent
 `handy-api-production` environment. Download both
@@ -375,7 +377,7 @@ release_run_id="$(gh run list \
   --workflow upstream-sync.yml \
   --branch main \
   --event workflow_dispatch \
-  --commit "$closure_sha" \
+  --commit "$verifier_fix_sha" \
   --limit 1 \
   --json databaseId \
   --jq '.[0].databaseId')"
@@ -385,7 +387,7 @@ test "$(gh run view "$release_run_id" \
   --repo "$fork_repo" \
   --json event,headSha \
   --jq '[.event, .headSha] | @tsv')" = \
-  "workflow_dispatch$(printf '\t')${closure_sha}"
+  "workflow_dispatch$(printf '\t')${verifier_fix_sha}"
 gh run view "$release_run_id" --repo "$fork_repo" --web
 gh run watch "$release_run_id" --repo "$fork_repo" --exit-status
 ```
@@ -405,10 +407,12 @@ The sync workflow enforces this order before publication:
 5. Director download and independent read-back of both unsigned artifacts,
    followed by a stop at the unapproved `handy-api-signing` environment;
 6. after separate authorization, signer-side exact receipt/input verification
-   before any signing secret is used;
+   and digest/inventory/x64 Minisign preflight before any signing secret is
+   used;
 7. no-checkout Tauri CLI 2.11.4 signing of only
    `Handy.API_<version>_x64-setup.exe`, with explicit pre/post EXE hash and size
-   invariance, followed by secret-free Minisign verification;
+   invariance, followed by secret-free verification through the digest-pinned,
+   exact-inventory `minisign-win64/x86_64/minisign.exe`;
 8. upload of the exact two-file signed artifact and separate one-JSON signing
    receipt artifact;
 9. protected `handy-api-production` wait while that exact signed artifact

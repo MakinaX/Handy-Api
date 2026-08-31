@@ -875,6 +875,15 @@ for (const releaseInvariant of [
   "Cryptographic updater signature verification failed",
   "minisign-0.12-win64.zip",
   "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479",
+  '"minisign-win64/aarch64/minisign.exe"',
+  '"minisign-win64/x86_64/minisign.exe"',
+  "Pinned Minisign verifier inventory is not exact",
+  'if ($env:RUNNER_ARCH -cne "X64")',
+  "Pinned x86_64 Minisign verifier is missing or unsafe",
+  "Pinned x86_64 Minisign verifier cannot execute exactly",
+  "Prepare pinned x64 Minisign verifier without secrets",
+  "Pinned Minisign verifier staging path is not fresh",
+  "Prepared Minisign verifier archive is missing or unsafe",
   "Handy.API_${fork_version}_x64-setup.exe",
   "build-unsigned-windows-x64:",
   `--config '{"bundle":{"createUpdaterArtifacts":false}}'`,
@@ -896,6 +905,13 @@ for (const releaseInvariant of [
     `upstream-sync release invariant is missing: ${releaseInvariant}`,
   );
 }
+expect(
+  !upstreamSync.includes("Expected exactly one minisign.exe") &&
+    !upstreamSync.includes("$verifiers[0].FullName") &&
+    !upstreamSync.includes("$actualVerifierPaths[0]") &&
+    !upstreamSync.includes("Select-Object -First 1"),
+  "upstream-sync still assumes the pinned multi-architecture Minisign archive contains one executable",
+);
 const unsignedVerificationStepStart = upstreamSync.indexOf(
   "- name: Verify exact unsigned updater output and runtime",
 );
@@ -1178,6 +1194,9 @@ const signingInputVerificationStart = signingJobSource.indexOf(
 const signerInstallStart = signingJobSource.indexOf(
   "- name: Install trusted Tauri signer without secrets",
 );
+const verifierPreparationStart = signingJobSource.indexOf(
+  "- name: Prepare pinned x64 Minisign verifier without secrets",
+);
 const signerCommandStart = signingJobSource.indexOf(
   "- name: Sign exact updater artifact",
 );
@@ -1244,7 +1263,8 @@ expect(
     signingReceiptDownloadStart > signingInputDownloadStart &&
     signingInputVerificationStart > signingReceiptDownloadStart &&
     signerInstallStart > signingInputVerificationStart &&
-    signerCommandStart > signerInstallStart &&
+    verifierPreparationStart > signerInstallStart &&
+    signerCommandStart > verifierPreparationStart &&
     signatureVerificationStart > signerCommandStart &&
     signedArtifactUploadStart > signatureVerificationStart &&
     signingReceiptCreationStart > signedArtifactUploadStart &&
@@ -1348,6 +1368,136 @@ expect(
   "artifact API metadata read-back must complete before candidate public-key data is read",
 );
 
+const verifierPreparationStep = signingJobSource.slice(
+  verifierPreparationStart,
+  signerCommandStart,
+);
+const prepareVerifierCapabilityGate = verifierPreparationStep.indexOf(
+  'if ($env:RUNNER_ARCH -cne "X64")',
+);
+const prepareVerifierArchive = verifierPreparationStep.indexOf(
+  '$verifierArchive = Join-Path $env:RUNNER_TEMP "minisign-0.12-win64.zip"',
+);
+const prepareVerifierRoot = verifierPreparationStep.indexOf(
+  '$verifierRoot = Join-Path $env:RUNNER_TEMP "minisign-0.12-win64-preflight"',
+);
+const prepareVerifierArchiveFreshGate = verifierPreparationStep.indexOf(
+  "Test-Path -LiteralPath $verifierArchive",
+);
+const prepareVerifierRootFreshGate = verifierPreparationStep.indexOf(
+  "Test-Path -LiteralPath $verifierRoot",
+);
+const prepareVerifierStagingGate = verifierPreparationStep.indexOf(
+  'throw "Pinned Minisign verifier staging path is not fresh"',
+);
+const prepareVerifierDownload = verifierPreparationStep.indexOf(
+  "Invoke-WebRequest -Uri $verifierUrl -OutFile $verifierArchive",
+);
+const prepareVerifierHashComputation = verifierPreparationStep.indexOf(
+  "$verifierHash = (Get-FileHash -LiteralPath $verifierArchive",
+);
+const prepareVerifierExactHashComputations =
+  verifierPreparationStep.match(
+    /^\s*\$verifierHash\s*=\s*\(Get-FileHash -LiteralPath \$verifierArchive\s*`\r?\n\s*-Algorithm SHA256\)\.Hash\.ToLowerInvariant\(\)\s*$/gm,
+  )?.length ?? 0;
+const prepareVerifierDigestGate = verifierPreparationStep.indexOf(
+  'if ($verifierHash -ne "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479")',
+);
+const prepareVerifierArchiveExpansion = verifierPreparationStep.indexOf(
+  "Expand-Archive -LiteralPath $verifierArchive",
+);
+const prepareVerifierExpansionDestination = verifierPreparationStep.indexOf(
+  "-DestinationPath $verifierRoot",
+  prepareVerifierArchiveExpansion,
+);
+const prepareVerifierExpectedInventory = verifierPreparationStep.indexOf(
+  "$expectedVerifierPaths = @(",
+);
+const prepareVerifierActualInventory = verifierPreparationStep.indexOf(
+  "$actualVerifierPaths = @(",
+);
+const prepareVerifierInventoryGate = verifierPreparationStep.indexOf(
+  "$actualVerifierPaths.Count -ne $expectedVerifierPaths.Count",
+);
+const prepareVerifierSelection = verifierPreparationStep.indexOf(
+  "$verifierExe = Join-Path $verifierRoot",
+);
+const prepareVerifierSelectedX64Path = verifierPreparationStep.indexOf(
+  '"minisign-win64/x86_64/minisign.exe"',
+  prepareVerifierSelection,
+);
+const prepareVerifierLiteralLeafGate = verifierPreparationStep.indexOf(
+  "Test-Path -LiteralPath $verifierExe -PathType Leaf",
+);
+const prepareVerifierReparseGate = verifierPreparationStep.indexOf(
+  "(Get-Item -LiteralPath $verifierExe).Attributes",
+);
+const prepareVerifierVersionInvocation = verifierPreparationStep.indexOf(
+  "$verifierVersion = (& $verifierExe -v | Out-String).Trim()",
+);
+const prepareVerifierExitCodeGate = verifierPreparationStep.indexOf(
+  "$LASTEXITCODE -ne 0",
+  prepareVerifierVersionInvocation,
+);
+const prepareVerifierVersionGate = verifierPreparationStep.indexOf(
+  '$verifierVersion -cne "minisign 0.12"',
+);
+const prepareVerifierVersionFailure = verifierPreparationStep.indexOf(
+  'throw "Pinned x86_64 Minisign verifier cannot execute exactly"',
+);
+const prepareVerifierAssignments =
+  verifierPreparationStep.match(/^\s*\$verifierExe\s*=/gm)?.length ?? 0;
+const prepareVerifierArchiveAssignments =
+  verifierPreparationStep.match(/^\s*\$verifierArchive\s*=/gm)?.length ?? 0;
+const prepareVerifierRootAssignments =
+  verifierPreparationStep.match(/^\s*\$verifierRoot\s*=/gm)?.length ?? 0;
+const prepareVerifierHashAssignments =
+  verifierPreparationStep.match(/^\s*\$verifierHash\s*=/gm)?.length ?? 0;
+const prepareVerifierVersionAssignments =
+  verifierPreparationStep.match(/^\s*\$verifierVersion\s*=/gm)?.length ?? 0;
+expect(
+  prepareVerifierCapabilityGate >= 0 &&
+    prepareVerifierArchive > prepareVerifierCapabilityGate &&
+    prepareVerifierRoot > prepareVerifierArchive &&
+    prepareVerifierArchiveFreshGate > prepareVerifierRoot &&
+    prepareVerifierRootFreshGate > prepareVerifierArchiveFreshGate &&
+    prepareVerifierStagingGate > prepareVerifierRootFreshGate &&
+    prepareVerifierDownload > prepareVerifierStagingGate &&
+    prepareVerifierHashComputation > prepareVerifierDownload &&
+    prepareVerifierDigestGate > prepareVerifierHashComputation &&
+    prepareVerifierArchiveExpansion > prepareVerifierDigestGate &&
+    prepareVerifierExpansionDestination > prepareVerifierArchiveExpansion &&
+    prepareVerifierExpectedInventory > prepareVerifierExpansionDestination &&
+    prepareVerifierActualInventory > prepareVerifierExpectedInventory &&
+    prepareVerifierInventoryGate > prepareVerifierActualInventory &&
+    prepareVerifierSelection > prepareVerifierInventoryGate &&
+    prepareVerifierSelectedX64Path > prepareVerifierSelection &&
+    prepareVerifierLiteralLeafGate > prepareVerifierSelectedX64Path &&
+    prepareVerifierReparseGate > prepareVerifierLiteralLeafGate &&
+    prepareVerifierVersionInvocation > prepareVerifierReparseGate &&
+    prepareVerifierExitCodeGate > prepareVerifierVersionInvocation &&
+    prepareVerifierVersionGate > prepareVerifierExitCodeGate &&
+    prepareVerifierVersionFailure > prepareVerifierVersionGate &&
+    prepareVerifierAssignments === 1 &&
+    prepareVerifierArchiveAssignments === 1 &&
+    prepareVerifierRootAssignments === 1 &&
+    prepareVerifierHashAssignments === 1 &&
+    prepareVerifierExactHashComputations === 1 &&
+    prepareVerifierVersionAssignments === 1 &&
+    verifierPreparationStep.includes('"minisign-win64/aarch64/minisign.exe"') &&
+    verifierPreparationStep.includes('"minisign-win64/x86_64/minisign.exe"') &&
+    !verifierPreparationStep.includes("Expand-Archive -Force") &&
+    !verifierPreparationStep.includes(
+      "-DestinationPath $verifierRoot -Force",
+    ) &&
+    !verifierPreparationStep.includes("TAURI_SIGNING_PRIVATE_KEY") &&
+    !verifierPreparationStep.includes("$verifiers[0]") &&
+    !verifierPreparationStep.includes("$actualVerifierPaths[0]") &&
+    !/Select-Object\s+-First\s+1/i.test(verifierPreparationStep) &&
+    !/Get-Command\s+(?:minisign|minisign\.exe)/i.test(verifierPreparationStep),
+  "pinned Minisign preflight must fail closed before the secret-bearing signing step",
+);
+
 const signerCommandStep = signingJobSource.slice(
   signerCommandStart,
   signatureVerificationStart,
@@ -1389,6 +1539,93 @@ const signatureVerificationStep = signingJobSource.slice(
   signatureVerificationStart,
   signedArtifactUploadStart,
 );
+const verifierCapabilityGate = signatureVerificationStep.indexOf(
+  'if ($env:RUNNER_ARCH -cne "X64")',
+);
+const verificationByteInvarianceGate = signatureVerificationStep.indexOf(
+  'throw "Installer byte invariance evidence does not match the unsigned receipt"',
+);
+const preparedVerifierArchive = signatureVerificationStep.indexOf(
+  '$verifierArchive = Join-Path $env:RUNNER_TEMP "minisign-0.12-win64.zip"',
+);
+const preparedVerifierRoot = signatureVerificationStep.indexOf(
+  '$verifierRoot = Join-Path $env:RUNNER_TEMP "minisign-0.12-win64-verify"',
+);
+const preparedVerifierArchiveLeafGate = signatureVerificationStep.indexOf(
+  "Test-Path -LiteralPath $verifierArchive -PathType Leaf",
+);
+const preparedVerifierArchiveReparseGate = signatureVerificationStep.indexOf(
+  "(Get-Item -LiteralPath $verifierArchive).Attributes",
+);
+const preparedVerifierFreshRootGate = signatureVerificationStep.indexOf(
+  "Test-Path -LiteralPath $verifierRoot",
+);
+const preparedVerifierArchiveSafetyGate = signatureVerificationStep.indexOf(
+  'throw "Prepared Minisign verifier archive is missing or unsafe"',
+);
+const verifierHashComputation = signatureVerificationStep.indexOf(
+  "$verifierHash = (Get-FileHash -LiteralPath $verifierArchive",
+);
+const exactVerifierHashComputations =
+  signatureVerificationStep.match(
+    /^\s*\$verifierHash\s*=\s*\(Get-FileHash -LiteralPath \$verifierArchive\s*`\r?\n\s*-Algorithm SHA256\)\.Hash\.ToLowerInvariant\(\)\s*$/gm,
+  )?.length ?? 0;
+const verifierDigestGate = signatureVerificationStep.indexOf(
+  'if ($verifierHash -ne "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479")',
+);
+const verifierArchiveExpansion = signatureVerificationStep.indexOf(
+  "Expand-Archive -LiteralPath $verifierArchive",
+);
+const verifierExpansionDestination = signatureVerificationStep.indexOf(
+  "-DestinationPath $verifierRoot",
+  verifierArchiveExpansion,
+);
+const verifierExpectedInventory = signatureVerificationStep.indexOf(
+  "$expectedVerifierPaths = @(",
+);
+const verifierActualInventory = signatureVerificationStep.indexOf(
+  "$actualVerifierPaths = @(",
+);
+const verifierInventoryGate = signatureVerificationStep.indexOf(
+  "$actualVerifierPaths.Count -ne $expectedVerifierPaths.Count",
+);
+const verifierSelection = signatureVerificationStep.indexOf(
+  "$verifierExe = Join-Path $verifierRoot",
+);
+const verifierSelectedX64Path = signatureVerificationStep.indexOf(
+  '"minisign-win64/x86_64/minisign.exe"',
+  verifierSelection,
+);
+const verifierLiteralLeafGate = signatureVerificationStep.indexOf(
+  "Test-Path -LiteralPath $verifierExe -PathType Leaf",
+);
+const verifierReparseGate = signatureVerificationStep.indexOf(
+  "(Get-Item -LiteralPath $verifierExe).Attributes",
+);
+const verifierKeyAndSignatureDecode = signatureVerificationStep.indexOf(
+  "[IO.File]::WriteAllBytes(",
+);
+const verifierInvocation = signatureVerificationStep.indexOf(
+  "& $verifierExe -Vm $installer -p $publicKeyPath -x $decodedSignaturePath",
+);
+const verifierFailureGate = signatureVerificationStep.indexOf(
+  'throw "Cryptographic updater signature verification failed"',
+);
+const signedAssetCopy = signatureVerificationStep.indexOf(
+  "Copy-Item -LiteralPath $installer -Destination signed-assets/",
+);
+const verifierAssignments =
+  signatureVerificationStep.match(/^\s*\$verifierExe\s*=/gm)?.length ?? 0;
+const verifierArchiveAssignments =
+  signatureVerificationStep.match(/^\s*\$verifierArchive\s*=/gm)?.length ?? 0;
+const verifierRootAssignments =
+  signatureVerificationStep.match(/^\s*\$verifierRoot\s*=/gm)?.length ?? 0;
+const verifierHashAssignments =
+  signatureVerificationStep.match(/^\s*\$verifierHash\s*=/gm)?.length ?? 0;
+const verifierSelectionWindow = signatureVerificationStep.slice(
+  verifierArchiveExpansion,
+  verifierInvocation,
+);
 expect(
   signatureVerificationStep.includes("id: verify-signed") &&
     signatureVerificationStep.includes("$signedFiles.Count -ne 2") &&
@@ -1413,6 +1650,54 @@ expect(
     ) &&
     signatureVerificationStep.includes('"signature-sha256=$signatureHash"'),
   "verified signed evidence outputs must follow byte and cryptographic signature gates",
+);
+expect(
+  verifierCapabilityGate >= 0 &&
+    verificationByteInvarianceGate > verifierCapabilityGate &&
+    preparedVerifierArchive > verificationByteInvarianceGate &&
+    preparedVerifierRoot > preparedVerifierArchive &&
+    preparedVerifierArchiveLeafGate > preparedVerifierRoot &&
+    preparedVerifierArchiveReparseGate > preparedVerifierArchiveLeafGate &&
+    preparedVerifierFreshRootGate > preparedVerifierArchiveReparseGate &&
+    preparedVerifierArchiveSafetyGate > preparedVerifierFreshRootGate &&
+    verifierHashComputation > preparedVerifierArchiveSafetyGate &&
+    verifierDigestGate > verifierHashComputation &&
+    verifierArchiveExpansion > verifierDigestGate &&
+    verifierExpansionDestination > verifierArchiveExpansion &&
+    verifierExpectedInventory > verifierExpansionDestination &&
+    verifierActualInventory > verifierExpectedInventory &&
+    verifierInventoryGate > verifierActualInventory &&
+    verifierSelection > verifierInventoryGate &&
+    verifierSelectedX64Path > verifierSelection &&
+    verifierLiteralLeafGate > verifierSelectedX64Path &&
+    verifierReparseGate > verifierLiteralLeafGate &&
+    verifierKeyAndSignatureDecode > verifierReparseGate &&
+    verifierInvocation > verifierKeyAndSignatureDecode &&
+    verifierFailureGate > verifierInvocation &&
+    signedAssetCopy > verifierFailureGate &&
+    verifierAssignments === 1 &&
+    verifierArchiveAssignments === 1 &&
+    verifierRootAssignments === 1 &&
+    verifierHashAssignments === 1 &&
+    exactVerifierHashComputations === 1 &&
+    signatureVerificationStep.includes(
+      '"minisign-win64/aarch64/minisign.exe"',
+    ) &&
+    signatureVerificationStep.includes(
+      '"minisign-win64/x86_64/minisign.exe"',
+    ) &&
+    !signatureVerificationStep.includes("Expand-Archive -Force") &&
+    !signatureVerificationStep.includes(
+      "-DestinationPath $verifierRoot -Force",
+    ) &&
+    !signatureVerificationStep.includes("Invoke-WebRequest") &&
+    !signatureVerificationStep.includes("$verifiers[0]") &&
+    !signatureVerificationStep.includes("$actualVerifierPaths[0]") &&
+    !/Select-Object\s+-First\s+1/i.test(verifierSelectionWindow) &&
+    !/Get-Command\s+(?:minisign|minisign\.exe)/i.test(
+      signatureVerificationStep,
+    ),
+  "prepared Minisign revalidation, exact x64 selection, safety, and invocation gates are incomplete or out of order",
 );
 
 const signedArtifactUploadStep = signingJobSource.slice(

@@ -10,10 +10,14 @@ Baseline tag/commit: `v0.9.6` / `af48dd68a64d58aad128fdbb920492a03da53c79`
 
 The local implementation and release scaffolding are substantially complete,
 but this checkout does **not** yet satisfy the brief's final completion
-standard. A later live run built and runtime-smoked an unsigned Windows NSIS
-installer, but its Actions artifact predates the durable unsigned receipt and
-signer pre/post byte-invariance gates. It is therefore blocked signing input,
-not an approvable candidate. Live Gemini, physical microphone, cursor-paste,
+standard. Receipt-hardened run `33354201384` built and runtime-smoked an
+unsigned Windows NSIS installer, emitted its durable receipt, and passed the
+Director's independent byte read-back. After one signing-only approval, the
+signing input gate, Tauri signature command, and installer byte-invariance gate
+passed. The following step failed closed before cryptographic verification
+because it assumed the pinned multi-architecture Minisign archive contained one
+recursive executable. No signed artifact or signing receipt was uploaded, and
+production did not run. Live Gemini, physical microphone, cursor-paste,
 Credential Manager, installer-isolation, and updater acceptance remain
 **NOT EXECUTED** on physical Windows.
 
@@ -21,16 +25,14 @@ The product and repository identity is now `Handy API` / `MakinaX/Handy-Api`.
 The Director reports that GitHub authentication and a dedicated updater
 keypair already exist on the trusted Windows machine. The updater public key is
 now bound to the fork and the strict release contract passes. The private key
-and password were not read or printed. The environment-level secrets and both
-protected approval environments are configured. The failed run never reached a
-pending deployment. Run `33308322090` later reached the still-unapproved
-`handy-api-signing` gate, but it was cancelled without approval, runner
-assignment, signer steps, secret access, signing, or production execution.
-Queued old-source run `33340123965` was cancelled first without any job or
-artifact. The authenticated read-back is preserved in
-`Docs/HANDY-API-SIGNING-ROOTFIX-RECEIPT.json`. A replacement run using the
-receipt rootfix must stop again at `handy-api-signing` after unsigned evidence
-read-back. The exact procedure is in `Docs/HANDY-API-ONE-TIME-SETUP.md`.
+and password were not read by this checkout or printed. The environment-level
+secrets and both protected approval environments are configured. Earlier
+old-source runs were cancelled safely, as recorded in
+`Docs/HANDY-API-SIGNING-ROOTFIX-RECEIPT.json`; the current failed signing run is
+recorded separately in `Docs/HANDY-API-MINISIGN-ROOTFIX-RECEIPT.json`. A new
+commit and wholly new run must repeat unsigned evidence read-back and receive a
+new exact-run signing approval. The exact procedure is in
+`Docs/HANDY-API-ONE-TIME-SETUP.md`.
 
 ## Fresh baseline and adopted upstream work
 
@@ -240,38 +242,38 @@ is inferred from this package-build result.
 
 These 2026-08-30 rows predate the signing-receipt rootfix. They do not establish
 the current workflow's receipt schemas, negative cases, artifact inventories,
-or signer byte invariance. The current-tree checks below were rerun for those
-surfaces; exact push-owned CI and the replacement native Windows workflow still
-must run against the final commit.
+or signer byte invariance. The receipt-rootfix checks and their exact live runs
+are recorded below.
 
-### Receipt rootfix local verification
+### Receipt rootfix verification record
 
-The following 2026-08-31 results apply to the current rootfix working tree, not
-to any pushed commit or Windows workflow run:
+The local checks were run before receipt-rootfix commit
+`47a0407a1eb5851b5f6819f5d1400a4cb937e573`; the last three rows bind the
+subsequent exact push CI and native Windows run:
 
-| Check                                       | Result       | Current rootfix evidence / limitation                                                                                                                                                                               |
-| ------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Release contract, scaffold and strict modes | PASS         | exact fork identity and updater key contract                                                                                                                                                                        |
-| Public-leak audit                           | PASS         | intended tree, ignored filenames, and reachable history contain no updater private material, credential value, private backup path, or generated installer/signature evidence; inherited fixtures/assets classified |
-| Receipt contract and negative suite         | PASS         | tampered receipt/hash/identity, one-byte EXE change, pre/post mismatch, foreign/extra files, schema/type/encoding bounds, and artifact identity cases rejected                                                      |
-| Workflow YAML parse                         | PASS         | all workflow YAML files parsed                                                                                                                                                                                      |
-| Embedded PowerShell parser                  | PASS         | 11 workflow PowerShell blocks parsed                                                                                                                                                                                |
-| Embedded Bash parser                        | PASS         | 7 workflow Bash blocks parsed                                                                                                                                                                                       |
-| Translation parity                          | PASS         | all 23 non-English locales match the source keys                                                                                                                                                                    |
-| Portable updater resolver                   | PASS         | exact fork release resolution and rejection cases                                                                                                                                                                   |
-| ESLint                                      | PASS         | current frontend tree                                                                                                                                                                                               |
-| TypeScript and Vite production build        | PASS         | strict type-check and production bundle                                                                                                                                                                             |
-| Playwright                                  | PASS         | 2/2 in official `mcr.microsoft.com/playwright:v1.58.0-noble` container                                                                                                                                              |
-| Direct host Playwright                      | ENV-BLOCKED  | host lacks `libatk`; the official pinned container result is the executed browser evidence                                                                                                                          |
-| Rust formatting                             | PASS         | `cargo +1.88 fmt -- --check`                                                                                                                                                                                        |
-| Full Rust tests and Clippy                  | NOT EXECUTED | deferred to the exact push-owned CI run for the final rootfix commit                                                                                                                                                |
-| Full Nix package build                      | NOT EXECUTED | deferred to the exact push-owned CI run for the final rootfix commit                                                                                                                                                |
-| Native Windows receipt workflow             | NOT EXECUTED | requires the replacement upstream-sync run after old-source cancellation                                                                                                                                            |
+| Check                                       | Result      | Current rootfix evidence / limitation                                                                                                                                                                               |
+| ------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Release contract, scaffold and strict modes | PASS        | exact fork identity and updater key contract                                                                                                                                                                        |
+| Public-leak audit                           | PASS        | intended tree, ignored filenames, and reachable history contain no updater private material, credential value, private backup path, or generated installer/signature evidence; inherited fixtures/assets classified |
+| Receipt contract and negative suite         | PASS        | tampered receipt/hash/identity, one-byte EXE change, pre/post mismatch, foreign/extra files, schema/type/encoding bounds, and artifact identity cases rejected                                                      |
+| Workflow YAML parse                         | PASS        | all workflow YAML files parsed                                                                                                                                                                                      |
+| Embedded PowerShell parser                  | PASS        | 11 workflow PowerShell blocks parsed                                                                                                                                                                                |
+| Embedded Bash parser                        | PASS        | 7 workflow Bash blocks parsed                                                                                                                                                                                       |
+| Translation parity                          | PASS        | all 23 non-English locales match the source keys                                                                                                                                                                    |
+| Portable updater resolver                   | PASS        | exact fork release resolution and rejection cases                                                                                                                                                                   |
+| ESLint                                      | PASS        | current frontend tree                                                                                                                                                                                               |
+| TypeScript and Vite production build        | PASS        | strict type-check and production bundle                                                                                                                                                                             |
+| Playwright                                  | PASS        | 2/2 in official `mcr.microsoft.com/playwright:v1.58.0-noble` container                                                                                                                                              |
+| Direct host Playwright                      | ENV-BLOCKED | host lacks `libatk`; the official pinned container result is the executed browser evidence                                                                                                                          |
+| Rust formatting                             | PASS        | `cargo +1.88 fmt -- --check`                                                                                                                                                                                        |
+| Full Rust tests and Clippy                  | PASS        | push-owned CI run `33351528982` on exact receipt-rootfix commit                                                                                                                                                     |
+| Full Nix package build                      | PASS        | push-owned CI run `33351528982` on exact receipt-rootfix commit                                                                                                                                                     |
+| Native Windows receipt workflow             | FAIL-CLOSED | run `33354201384` passed unsigned receipt/read-back and signer invariance, then stopped before Minisign invocation; signed evidence, production, tags, and releases remained zero                                   |
 
-These local passes do not make signing approval ready. The Director must still
-download the replacement run's unsigned EXE and unsigned receipt artifacts and
-independently match GitHub artifact identity/digest and inner EXE size/SHA
-before any later approval-ready decision.
+These results cannot be reused to approve or publish. The exact-x64 verifier fix
+requires a new commit and full run. The Director must download that new run's
+unsigned EXE and receipt, independently match its fresh artifact identity,
+digest, inner EXE size, and SHA, then make a new run-specific signing decision.
 
 ## Live closure runs and current signing blocker
 
@@ -320,13 +322,65 @@ before any later approval-ready decision.
   could not start the superseded workflow when `33308322090` was cancelled.
   Both cancellation results and the retained old artifact metadata are in
   `Docs/HANDY-API-SIGNING-ROOTFIX-RECEIPT.json`.
-- The current working-tree rootfix adds separate unsigned and signing receipts,
-  artifact ID/archive-digest binding, exact inventories, receipt schema and
-  negative-case tests, signer pre/post hash-and-size invariance, and
-  publication-time receipt-chain verification. No replacement run has yet
-  demonstrated those gates.
+- Receipt-rootfix commit `47a0407a1eb5851b5f6819f5d1400a4cb937e573`
+  added separate unsigned and signing receipts, artifact ID/archive-digest
+  binding, exact inventories, receipt schema and negative-case tests, signer
+  pre/post hash-and-size invariance, and publication-time receipt-chain
+  verification. Push CI run
+  [`33351528982`](https://github.com/MakinaX/Handy-Api/actions/runs/33351528982)
+  passed frontend/contracts, Rust, and the actual Nix package build on that
+  exact commit.
+- Replacement upstream-sync run
+  [`33354201384`](https://github.com/MakinaX/Handy-Api/actions/runs/33354201384)
+  used the same exact workflow-source and candidate SHA. Candidate gates,
+  strict release contract, unsigned Windows build, installed runtime smoke,
+  one-EXE upload, and separate unsigned-receipt upload all passed. The
+  Director independently matched installer `Handy.API_0.9.6-api.1_x64-setup.exe`
+  at 21,568,046 bytes and SHA-256
+  `df36d254164bcea61325338f678968e93ae6cdfacbdeddccc0de1b90f1b91383`
+  to the durable receipt, whose SHA-256 is
+  `057926401bf55e8d41ee2cca04da187419a497088456ed90eb871c0748daeb62`.
+- The Director then approved only `handy-api-signing`. Signer-side receipt and
+  input verification passed; the secret-bearing Tauri sign step succeeded and
+  its explicit pre/post installer hash-and-size gate passed. The following
+  secret-free verification step failed closed before invoking Minisign because
+  the pinned Minisign 0.12 Windows archive contains the two expected
+  architecture executables, while the workflow incorrectly required one
+  recursive `minisign.exe` result. The exact message was
+  `Expected exactly one minisign.exe, found 2`.
+- Run `33354201384` therefore uploaded no signed artifact or signing receipt,
+  skipped production, and retained zero tags and releases. The failure and
+  artifact evidence are recorded in
+  `Docs/HANDY-API-MINISIGN-ROOTFIX-RECEIPT.json`. The verifier fix now checks
+  the pinned digest and exact two-file architecture inventory, selects only
+  `minisign-win64/x86_64/minisign.exe` on the required x64 runner before the
+  secret-bearing signing step, requires its native version output to be exactly
+  `minisign 0.12`, then re-hashes and freshly expands the archive before
+  post-signature invocation. A fresh commit and full run are required; the
+  failed run must not be rerun.
 - Windows acceptance remains **NOT EXECUTED**. A fresh full run is required;
   the prior runs are retained only as fail-closed diagnostic evidence.
+
+### Exact-x64 verifier rootfix local verification
+
+These checks apply to the exact-x64 verifier fix in this tree. They prove its
+local contract and parser behavior, not Windows cryptographic verification:
+
+| Check                                     | Result       | Evidence                                                                                                                              |
+| ----------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Release contract, scaffold and strict     | PASS         | Bun 1.2.23; exact repository and release mode                                                                                         |
+| Receipt schemas and negative suite        | PASS         | all unsigned/signing receipt assertions                                                                                               |
+| Workflow and embedded shell parse         | PASS         | 11 YAML files; all 19 explicit PowerShell and 20 explicit Bash blocks parsed after GitHub-expression substitution                     |
+| Pinned archive preflight/revalidation     | PASS         | digest-matched 0.12 archive; exact aarch64/x86_64 inventory; literal x86_64 selection                                                 |
+| Minisign dynamic negative cases           | PASS         | extra verifier, non-x64 runner, and archive tamper rejected                                                                           |
+| Release-contract mutation negative cases  | PASS         | 15 cases rejected: recursive/ARM selection, missing arch/inventory/hash/exit gates, SHA drift, reassignment, and post-sign redownload |
+| Frontend lint and production build        | PASS         | Bun 1.2.23; inherited Vite large-chunk warning only                                                                                   |
+| Rust format, Clippy, and locked tests     | PASS         | Rust 1.88.0; CI-equivalent Clippy flags; 262 tests passed, 0 failed                                                                   |
+| Pinned ONNX Runtime contract              | PASS         | CI-equivalent dynamic ORT library identity, SONAME, and glibc compatibility gates                                                     |
+| Targeted Prettier, JSON, and diff checks  | PASS         | all changed workflow/checker/evidence files                                                                                           |
+| Public-leak audit                         | PASS         | actionable matches zero in current/history/name scopes; one synthetic redaction fixture classified                                    |
+| Windows x64 verifier version preflight    | NOT EXECUTED | exact pre-secret `minisign 0.12` gate is encoded; requires the fresh native Windows run                                               |
+| Native Windows cryptographic verification | NOT EXECUTED | requires the fresh committed upstream-sync run                                                                                        |
 
 ## External capability state
 
@@ -357,7 +411,9 @@ before any later approval-ready decision.
 - Local Windows build capability: unavailable on this x86_64 Linux
   host. The release workflow uses native `windows-latest` instead.
 
-No credential values were read, logged, or added to the repository.
+No credential values were exposed in logs or added to the repository. The one
+approved Tauri signing step consumed the environment-scoped secrets; no secret
+value was read back into this checkout.
 
 ## Required closure before calling the fork complete
 
@@ -367,26 +423,28 @@ No credential values were read, logged, or added to the repository.
    cancelled in the safe order with authenticated `completed/cancelled`
    read-back. The retained zero-approval, signer, production, tag, and release
    evidence is recorded in the rootfix receipt.
-3. Commit and push the validated workflow fix, read back that exact SHA on
-   `main`, and bind the push-triggered `handy-api-ci.yml` run to it.
-4. Dispatch exactly one fresh upstream-sync run. Require candidate gates,
-   unsigned Windows runtime smoke, the one-EXE unsigned artifact, the separate
-   one-JSON unsigned receipt artifact, and GitHub artifact read-back to pass.
-   The Director must download both artifacts and independently match artifact
-   identity/digest plus inner installer size/SHA to the receipt. Only then may a
-   later decision call the evidence `SIGNING APPROVAL READY`; for the currently
-   authorized phase, stop at the unapproved `handy-api-signing` gate.
-5. After separate authorization, approve signing, wait for the isolated signer
-   to prove pre/post EXE hash and size invariance, verify the signature, upload
-   the exact two-file signed artifact and one-JSON signing receipt, and confirm
-   `publish-release` pauses on
-   `handy-api-production`. Download that run's exact signed Windows x64
-   artifact and signing receipt, install the EXE alongside official Handy, and
-   execute the unchecked
+3. Receipt-rootfix commit `47a0407a1eb5851b5f6819f5d1400a4cb937e573`
+   was pushed and its exact push CI passed.
+4. Run `33354201384` proved the candidate gates, unsigned Windows runtime
+   smoke, separate EXE/receipt artifacts, Director inner-file read-back,
+   signer-side receipt/input gate, and pre/post EXE invariance. It then failed
+   closed on the multi-architecture Minisign archive inventory before
+   cryptographic verification, signed upload, production, tag, or release.
+5. Commit and push the pre-sign exact x86_64 verifier-preflight/revalidation
+   fix, bind its push CI, and dispatch a new full upstream-sync run. Repeat the
+   unsigned artifact and receipt Director read-back; do not reuse artifact IDs
+   or hashes from the failed run.
+6. After separate authorization for that new run, approve signing, wait for the
+   isolated signer to prove pre/post EXE hash and size invariance, verify the
+   signature with the exact x86_64 Minisign binary, upload the exact two-file
+   signed artifact and one-JSON signing receipt, and confirm `publish-release`
+   pauses on `handy-api-production`. Download that run's exact signed Windows
+   x64 artifact and signing receipt, install the EXE alongside official Handy,
+   and execute the unchecked
    [Windows acceptance checklist](HANDY-API-WINDOWS-ACCEPTANCE.md).
-6. Preserve the Actions URL, candidate SHA, all artifact IDs/archive digests,
+7. Preserve the Actions URL, candidate SHA, all artifact IDs/archive digests,
    inner file sizes/hashes, receipt hashes, and redacted manual evidence in this
    report.
-7. Only after every blocking item passes, separately approve
+8. Only after every blocking item passes, separately approve
    `handy-api-production`; the same run then verifies its draft bytes,
    fast-forwards `main`, and publishes the personal stable release.

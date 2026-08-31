@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "repository": "MakinaX/Handy-Api",
+  "recorded_at_utc": "2026-08-31T05:18:13Z",
+  "api_readback_at_utc": "2026-08-31T05:43:23Z",
+  "workflow_source_sha": "47a0407a1eb5851b5f6819f5d1400a4cb937e573",
+  "run": {
+    "id": "33354201384",
+    "event": "workflow_dispatch",
+    "candidate_sha": "47a0407a1eb5851b5f6819f5d1400a4cb937e573",
+    "status": "completed",
+    "conclusion": "failure"
+  },
+  "unsigned_artifact": {
+    "id": "9745540509",
+    "name": "handy-api-windows-x64-unsigned-0.9.6-api.1",
+    "archive_size_bytes": 21555475,
+    "archive_sha256": "a2a02b5b1503c6504f643564b3c73bce6f33f9f8fadc2a13cada44ffeda13228",
+    "expired": false,
+    "expires_at_utc": "2026-09-14T04:30:46Z",
+    "installer_filename": "Handy.API_0.9.6-api.1_x64-setup.exe",
+    "installer_size_bytes": 21568046,
+    "installer_sha256": "df36d254164bcea61325338f678968e93ae6cdfacbdeddccc0de1b90f1b91383",
+    "authenticode": "NotSigned"
+  },
+  "unsigned_receipt_artifact": {
+    "id": "9745541166",
+    "name": "handy-api-windows-x64-unsigned-receipt-0.9.6-api.1",
+    "archive_size_bytes": 559,
+    "archive_sha256": "148f66855e40e350eaab196fe4d6bcf3d8913e08fd37b7dfb901afbd2dad4154",
+    "expired": false,
+    "expires_at_utc": "2026-09-14T04:30:50Z",
+    "receipt_filename": "handy-api-windows-x64-unsigned-receipt.json",
+    "receipt_sha256": "057926401bf55e8d41ee2cca04da187419a497088456ed90eb871c0748daeb62",
+    "director_readback_result": "PASS"
+  },
+  "signing": {
+    "environment": "handy-api-signing",
+    "approval_count": 1,
+    "signing_job_id": "99381939920",
+    "signing_input_and_receipt_verification": "PASS",
+    "signing_secret_bearing_step_count": 1,
+    "signing_command_conclusion": "success",
+    "installer_byte_invariance": "PASS",
+    "verification_step_conclusion": "failure",
+    "cryptographic_verifier_executed": false,
+    "cryptographic_signature_verification_status": "NOT_EXECUTED",
+    "signed_artifact_count": 0,
+    "signing_receipt_artifact_count": 0,
+    "secret_values_exposed_or_recorded": false
+  },
+  "failure": {
+    "step": "Verify byte invariance and exact signature with committed public key",
+    "message": "Expected exactly one minisign.exe, found 2",
+    "pinned_minisign_version": "0.12",
+    "pinned_archive_sha256": "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479",
+    "workflow_observed_minisign_executable_count": 2,
+    "pinned_archive_inventory_source": "independent inspection of the digest-matched pinned archive",
+    "pinned_archive_minisign_executables": [
+      "minisign-win64/aarch64/minisign.exe",
+      "minisign-win64/x86_64/minisign.exe"
+    ],
+    "classification": "workflow verifier inventory assumption"
+  },
+  "rootfix_contract": {
+    "signing_runner_architecture": "X64",
+    "pre_sign_secret_free_preflight": true,
+    "pre_sign_native_version_gate": "minisign 0.12",
+    "pinned_archive_digest_rechecked_after_signing": true,
+    "post_sign_archive_expanded_to_fresh_directory": true,
+    "selected_executable": "minisign-win64/x86_64/minisign.exe",
+    "selected_executable_requires_literal_leaf_and_no_reparse_point": true,
+    "recursive_first_or_path_fallback_allowed": false,
+    "requires_new_commit_and_full_run": true,
+    "failed_run_rerun_allowed": false,
+    "windows_native_version_preflight_status": "NOT_EXECUTED",
+    "windows_cryptographic_verification_status": "NOT_EXECUTED"
+  },
+  "local_validation": {
+    "release_contract_scaffold": "PASS",
+    "release_contract_strict": "PASS",
+    "receipt_contract_and_negative_suite": "PASS",
+    "workflow_yaml_files_parsed": 11,
+    "embedded_powershell_blocks_parsed": 19,
+    "embedded_bash_blocks_parsed": 20,
+    "pinned_archive_preflight_and_revalidation": "PASS",
+    "extra_verifier_negative_case": "REJECTED",
+    "non_x64_runner_negative_case": "REJECTED",
+    "archive_tamper_negative_case": "REJECTED",
+    "recursive_first_negative_case": "REJECTED",
+    "missing_arch_inventory_or_digest_negative_cases": "REJECTED",
+    "hash_algorithm_drift_negative_cases": "REJECTED",
+    "variable_reassignment_negative_cases": "REJECTED",
+    "missing_native_exit_gate_negative_case": "REJECTED",
+    "arm_verifier_selection_negative_case": "REJECTED",
+    "post_sign_redownload_negative_case": "REJECTED",
+    "frontend_lint": "PASS",
+    "frontend_production_build": "PASS",
+    "rust_format": "PASS",
+    "rust_clippy_ci_equivalent": "PASS",
+    "rust_locked_tests": {
+      "status": "PASS",
+      "passed": 262,
+      "failed": 0
+    },
+    "pinned_onnxruntime_contract": "PASS",
+    "public_leak_audit": "PASS"
+  },
+  "retained_state": {
+    "actions_artifact_count": 2,
+    "production_job_id": "99385204830",
+    "production_job_conclusion": "skipped",
+    "production_deployment_count": 0,
+    "tag_count": 0,
+    "release_count": 0
+  },
+  "evidence_urls": [
+    "https://github.com/MakinaX/Handy-Api/actions/runs/33354201384",
+    "https://github.com/MakinaX/Handy-Api/actions/runs/33354201384/job/99381939920",
+    "https://api.github.com/repos/MakinaX/Handy-Api/actions/runs/33354201384",
+    "https://api.github.com/repos/MakinaX/Handy-Api/actions/runs/33354201384/artifacts",
+    "https://api.github.com/repos/MakinaX/Handy-Api/actions/runs/33354201384/approvals",
+    "https://api.github.com/repos/MakinaX/Handy-Api/deployments?sha=47a0407a1eb5851b5f6819f5d1400a4cb937e573",
+    "https://api.github.com/repos/MakinaX/Handy-Api/git/matching-refs/tags/",
+    "https://api.github.com/repos/MakinaX/Handy-Api/releases"
+  ],
+  "result": "FAIL_CLOSED"
+}
