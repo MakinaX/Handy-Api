@@ -43,6 +43,9 @@ jobs:
       - name: Check fork identity and updater isolation
         run: bun scripts/check-handy-api-release.ts
 
+      - name: Test receipt schemas and fail-closed negative cases
+        run: bun scripts/handy-api-receipt-contract.test.ts
+
       - name: Test portable updater resolution
         run: bun src/components/update-checker/portableInstaller.test.ts
 

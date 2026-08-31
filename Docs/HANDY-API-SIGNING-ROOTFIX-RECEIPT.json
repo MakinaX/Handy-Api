@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "repository": "MakinaX/Handy-Api",
+  "recorded_at_utc": "2026-08-31T02:38:15Z",
+  "purpose": "Prove that both runs using the superseded pre-receipt workflow were cancelled without signing or publication before the durable receipt rootfix was committed.",
+  "superseded_signing_run": {
+    "run_id": "33308322090",
+    "event": "workflow_dispatch",
+    "workflow_source_sha": "62c4947a36d3774527042da2776ff66d047002cd",
+    "candidate_sha": "62c4947a36d3774527042da2776ff66d047002cd",
+    "pre_cancel_status": "waiting",
+    "post_cancel_status": "completed",
+    "post_cancel_conclusion": "cancelled",
+    "approvals_before": 0,
+    "approvals_after": 0,
+    "signing_job": {
+      "job_id": "99255549330",
+      "runner_assigned": false,
+      "step_count": 0,
+      "signing_secret_access_count": 0,
+      "signing_command_count": 0
+    },
+    "unsigned_artifact": {
+      "artifact_id": "9731923966",
+      "artifact_name": "handy-api-windows-x64-unsigned-0.9.6-api.1",
+      "archive_size_bytes": 21549105,
+      "archive_digest": "sha256:6ce8c9bcc763396e462ebf352a7fbf4879c77aa4e533156bcaf9036a24945735",
+      "durable_unsigned_receipt_present": false
+    },
+    "director_installer_readback": {
+      "filename": "Handy.API_0.9.6-api.1_x64-setup.exe",
+      "size_bytes": 21561685,
+      "sha256": "acc08a58faf3b22996d8f48bf62513e34b5a2eb142b7bf564dd18a04cfc03e61",
+      "authenticode": "NotSigned"
+    },
+    "production_runner_count": 0,
+    "production_step_count": 0,
+    "production_deployment_count": 0,
+    "tag_count": 0,
+    "release_count": 0,
+    "main_sha_after_cancellation": "62c4947a36d3774527042da2776ff66d047002cd",
+    "automation_sha_after_cancellation": "62c4947a36d3774527042da2776ff66d047002cd"
+  },
+  "queued_old_source_run": {
+    "run_id": "33340123965",
+    "event": "schedule",
+    "workflow_source_sha": "62c4947a36d3774527042da2776ff66d047002cd",
+    "pre_cancel_status": "pending",
+    "post_cancel_status": "completed",
+    "post_cancel_conclusion": "cancelled",
+    "approvals_before": 0,
+    "approvals_after": 0,
+    "jobs_before": 0,
+    "jobs_after": 0,
+    "artifacts_before": 0,
+    "artifacts_after": 0
+  },
+  "evidence_urls": {
+    "superseded_run": "https://github.com/MakinaX/Handy-Api/actions/runs/33308322090",
+    "signing_job": "https://github.com/MakinaX/Handy-Api/actions/runs/33308322090/job/99255549330",
+    "queued_run": "https://github.com/MakinaX/Handy-Api/actions/runs/33340123965",
+    "environment_secret_boundary": "https://docs.github.com/en/actions/concepts/security/secrets"
+  },
+  "result": "PASS"
+}

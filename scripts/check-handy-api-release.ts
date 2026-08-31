@@ -734,6 +734,85 @@ expect(
   "portable installer does not fail closed to the exact fork release artifact",
 );
 
+const receiptContract = read("scripts/handy-api-receipt-contract.ts");
+const receiptContractTest = read("scripts/handy-api-receipt-contract.test.ts");
+for (const receiptField of [
+  "schema_version",
+  "repository",
+  "github_run_id",
+  "candidate_sha",
+  "fork_version",
+  "unsigned_artifact_name",
+  "unsigned_artifact_id",
+  "unsigned_artifact_archive_sha256",
+  "installer_filename",
+  "installer_size_bytes",
+  "installer_sha256",
+  "signed_artifact_name",
+  "signed_artifact_id",
+  "signed_artifact_archive_sha256",
+  "unsigned_receipt_artifact_name",
+  "unsigned_receipt_artifact_id",
+  "unsigned_receipt_artifact_archive_sha256",
+  "unsigned_receipt_filename",
+  "unsigned_receipt_sha256",
+  "pre_sign_installer_sha256",
+  "post_sign_installer_sha256",
+  "signature_filename",
+  "signature_sha256",
+  "byte_invariance",
+  "cryptographic_signature_verified",
+]) {
+  expect(
+    receiptContract.includes(`"${receiptField}"`),
+    `receipt schema field is not covered: ${receiptField}`,
+  );
+}
+for (const negativeReceiptCase of [
+  "tampered receipt SHA",
+  "receipt candidate SHA mismatch",
+  "one-byte installer change",
+  "pre/post installer mismatch",
+  "foreign installer",
+  "extra installer",
+  "tampered unsigned receipt identity",
+  "missing schema field",
+  "extra schema field",
+  "duplicate schema field",
+  "extra receipt artifact file",
+  "unsigned artifact ID mismatch",
+  "unsigned artifact archive digest mismatch",
+  "unsigned receipt artifact ID mismatch",
+  "unsigned receipt artifact archive digest mismatch",
+  "signed artifact name mismatch",
+  "signed artifact ID mismatch",
+  "signed artifact archive digest mismatch",
+  "signed installer change",
+  "signature change",
+  "false byte invariance",
+  "false cryptographic verification",
+]) {
+  expect(
+    receiptContractTest.includes(`"${negativeReceiptCase}"`),
+    `receipt negative case is not covered: ${negativeReceiptCase}`,
+  );
+}
+expect(
+  receiptContract.includes("assertExactKeys") &&
+    receiptContract.includes("requireExactFiles") &&
+    receiptContract.includes("assertArtifactArchiveIdentity") &&
+    receiptContract.includes("assertNoDuplicateTopLevelFields") &&
+    receiptContract.includes("GITHUB_ARTIFACT_ID_PATTERN") &&
+    receiptContract.includes("raw.pre_sign_installer_sha256 !==") &&
+    receiptContract.includes("raw.post_sign_installer_sha256") &&
+    receiptContractTest.includes("expectEveryMissingFieldFails(") &&
+    receiptContractTest.includes("unsignedWrongTypes") &&
+    receiptContractTest.includes("signingWrongTypes") &&
+    receiptContractTest.includes("verifyUnsignedReceiptAndInput(") &&
+    receiptContractTest.includes("verifySigningReceiptAndArtifacts("),
+  "receipt tests do not exercise exact schemas, inventories, and byte invariance",
+);
+
 const aboutSettings = read("src/components/settings/about/AboutSettings.tsx");
 const llmClient = read("src-tauri/src/llm_client.rs");
 expect(
@@ -802,7 +881,11 @@ for (const releaseInvariant of [
   "sign-windows-updater:",
   "name: handy-api-signing",
   "cargo install tauri-cli --version 2.11.4 --locked",
+  "handy-api-windows-x64-unsigned-receipt-",
+  "handy-api-windows-x64-unsigned-receipt.json",
   "handy-api-windows-x64-signed-",
+  "handy-api-windows-x64-signing-receipt-",
+  "handy-api-windows-x64-signing-receipt.json",
   "cmp --silent",
   '--repository "$GITHUB_REPOSITORY"',
   "name: handy-api-production",
@@ -820,10 +903,20 @@ const unsignedUploadStepStart = upstreamSync.indexOf(
   "- name: Upload exact unsigned signing input",
   unsignedVerificationStepStart,
 );
+const unsignedReceiptCreationStepStart = upstreamSync.indexOf(
+  "- name: Create durable unsigned receipt",
+  unsignedUploadStepStart,
+);
+const unsignedReceiptUploadStepStart = upstreamSync.indexOf(
+  "- name: Upload durable unsigned receipt",
+  unsignedReceiptCreationStepStart,
+);
 expect(
   unsignedVerificationStepStart >= 0 &&
-    unsignedUploadStepStart > unsignedVerificationStepStart,
-  "unsigned installer verification step boundaries are missing",
+    unsignedUploadStepStart > unsignedVerificationStepStart &&
+    unsignedReceiptCreationStepStart > unsignedUploadStepStart &&
+    unsignedReceiptUploadStepStart > unsignedReceiptCreationStepStart,
+  "unsigned installer/receipt step boundaries are missing or out of order",
 );
 const unsignedVerificationStep = upstreamSync.slice(
   unsignedVerificationStepStart,
@@ -908,8 +1001,74 @@ expect(
     stagedByteCheck > stagedCopy,
   "unsigned installer canonicalization and byte checks are out of order",
 );
+
+const unsignedUploadStep = upstreamSync.slice(
+  unsignedUploadStepStart,
+  unsignedReceiptCreationStepStart,
+);
+const unsignedReceiptCreationStep = upstreamSync.slice(
+  unsignedReceiptCreationStepStart,
+  unsignedReceiptUploadStepStart,
+);
+const unsignedReceiptUploadStep = upstreamSync.slice(
+  unsignedReceiptUploadStepStart,
+  upstreamSync.indexOf(
+    "\n  sign-windows-updater:",
+    unsignedReceiptUploadStepStart,
+  ),
+);
+expect(
+  unsignedUploadStep.includes("id: upload-unsigned") &&
+    unsignedUploadStep.includes(
+      "path: unsigned-assets/Handy.API_${{ needs.prepare-candidate.outputs.fork-version }}_x64-setup.exe",
+    ) &&
+    !unsignedUploadStep.includes("receipt"),
+  "unsigned signing-input artifact must upload only the canonical installer and expose immutable outputs",
+);
+for (const receiptCreationInvariant of [
+  "CANDIDATE_SHA: ${{ needs.prepare-candidate.outputs.candidate-sha }}",
+  "UNSIGNED_ARTIFACT_ID: ${{ steps.upload-unsigned.outputs.artifact-id }}",
+  "UNSIGNED_ARTIFACT_ARCHIVE_SHA256: ${{ steps.upload-unsigned.outputs.artifact-digest }}",
+  "$env:UNSIGNED_ARTIFACT_ID -notmatch '^[1-9][0-9]*$'",
+  "$env:UNSIGNED_ARTIFACT_ARCHIVE_SHA256 -notmatch '^[0-9a-f]{64}$'",
+  "schema_version = 1",
+  "repository = $env:GITHUB_REPOSITORY",
+  "github_run_id = [string]$env:GITHUB_RUN_ID",
+  "candidate_sha = $env:CANDIDATE_SHA",
+  "fork_version = $env:FORK_VERSION",
+  "unsigned_artifact_name = $env:UNSIGNED_ARTIFACT_NAME",
+  "unsigned_artifact_id = $env:UNSIGNED_ARTIFACT_ID",
+  "unsigned_artifact_archive_sha256 = $env:UNSIGNED_ARTIFACT_ARCHIVE_SHA256",
+  "installer_filename = $expectedName",
+  "installer_size_bytes = [int64]$stagedInstaller.Length",
+  "installer_sha256 = $stagedHash",
+  "$receiptFiles.Count -ne 1",
+  "$actualReceiptFields.Count -ne $expectedReceiptFields.Count",
+  "$receiptReadback.candidate_sha -cne $env:CANDIDATE_SHA",
+  "$receiptReadback.unsigned_artifact_id -cne $env:UNSIGNED_ARTIFACT_ID",
+  "$receiptReadback.unsigned_artifact_archive_sha256 -cne",
+  "$receiptReadback.installer_size_bytes",
+  "$receiptReadback.installer_sha256 -cne $stagedHash",
+]) {
+  expect(
+    unsignedReceiptCreationStep.includes(receiptCreationInvariant),
+    `unsigned receipt creation invariant is missing: ${receiptCreationInvariant}`,
+  );
+}
+expect(
+  unsignedReceiptUploadStep.includes("id: upload-unsigned-receipt") &&
+    unsignedReceiptUploadStep.includes(
+      "name: handy-api-windows-x64-unsigned-receipt-${{ needs.prepare-candidate.outputs.fork-version }}",
+    ) &&
+    unsignedReceiptUploadStep.includes(
+      "path: unsigned-receipt/handy-api-windows-x64-unsigned-receipt.json",
+    ) &&
+    !unsignedReceiptUploadStep.includes("unsigned-assets/"),
+  "durable unsigned receipt must be uploaded as a separate exact-one-file artifact",
+);
 for (const ciInvariant of [
   "bun install --frozen-lockfile",
+  "bun scripts/handy-api-receipt-contract.test.ts",
   "bunx prettier --check .",
   "bun run test:playwright",
   "cargo fmt -- --check",
@@ -1006,9 +1165,49 @@ const signingJob = upstreamSync.match(
 const signingSecretStep = signingJob?.match(
   /\n      - name: Sign exact updater artifact\n([\s\S]*?)\n      - name:/,
 )?.[1];
+const signingJobSource = signingJob ?? "";
+const signingInputDownloadStart = signingJobSource.indexOf(
+  "- name: Download exact unsigned signing input",
+);
+const signingReceiptDownloadStart = signingJobSource.indexOf(
+  "- name: Download durable unsigned receipt",
+);
+const signingInputVerificationStart = signingJobSource.indexOf(
+  "- name: Verify exact unsigned receipt and signing input",
+);
+const signerInstallStart = signingJobSource.indexOf(
+  "- name: Install trusted Tauri signer without secrets",
+);
+const signerCommandStart = signingJobSource.indexOf(
+  "- name: Sign exact updater artifact",
+);
+const signatureVerificationStart = signingJobSource.indexOf(
+  "- name: Verify byte invariance and exact signature with committed public key",
+);
+const signedArtifactUploadStart = signingJobSource.indexOf(
+  "- name: Upload exact signed acceptance artifact",
+);
+const signingReceiptCreationStart = signingJobSource.indexOf(
+  "- name: Create durable signing receipt",
+);
+const signingReceiptUploadStart = signingJobSource.indexOf(
+  "- name: Upload durable signing receipt",
+);
 expect(
   unsignedBuildJob !== undefined &&
     unsignedBuildJob.includes('createUpdaterArtifacts":false') &&
+    unsignedBuildJob.includes(
+      "unsigned-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}",
+    ) &&
+    unsignedBuildJob.includes(
+      "unsigned-artifact-digest: ${{ steps.upload-unsigned.outputs.artifact-digest }}",
+    ) &&
+    unsignedBuildJob.includes(
+      "unsigned-receipt-artifact-id: ${{ steps.upload-unsigned-receipt.outputs.artifact-id }}",
+    ) &&
+    unsignedBuildJob.includes(
+      "unsigned-receipt-artifact-digest: ${{ steps.upload-unsigned-receipt.outputs.artifact-digest }}",
+    ) &&
     !unsignedBuildJob.includes("TAURI_SIGNING_PRIVATE_KEY") &&
     !unsignedBuildJob.includes("handy-api-signing"),
   "candidate build is not isolated from updater signing secrets",
@@ -1022,11 +1221,437 @@ expect(
     signingJob.includes(
       "TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}",
     ) &&
+    signingJob.includes(
+      "signed-artifact-id: ${{ steps.upload-signed.outputs.artifact-id }}",
+    ) &&
+    signingJob.includes(
+      "signed-artifact-digest: ${{ steps.upload-signed.outputs.artifact-digest }}",
+    ) &&
+    signingJob.includes(
+      "signing-receipt-artifact-id: ${{ steps.upload-signing-receipt.outputs.artifact-id }}",
+    ) &&
+    signingJob.includes(
+      "signing-receipt-artifact-digest: ${{ steps.upload-signing-receipt.outputs.artifact-digest }}",
+    ) &&
     signingJob.includes("cargo install tauri-cli --version 2.11.4 --locked") &&
     !signingJob.includes("actions/checkout") &&
     !signingJob.includes("bun run") &&
     !signingJob.includes("tauri build"),
   "signing job must not checkout or execute candidate source",
+);
+expect(
+  signingInputDownloadStart >= 0 &&
+    signingReceiptDownloadStart > signingInputDownloadStart &&
+    signingInputVerificationStart > signingReceiptDownloadStart &&
+    signerInstallStart > signingInputVerificationStart &&
+    signerCommandStart > signerInstallStart &&
+    signatureVerificationStart > signerCommandStart &&
+    signedArtifactUploadStart > signatureVerificationStart &&
+    signingReceiptCreationStart > signedArtifactUploadStart &&
+    signingReceiptUploadStart > signingReceiptCreationStart,
+  "signer receipt/download/signature steps are missing or out of order",
+);
+
+const signingInputDownloadStep = signingJobSource.slice(
+  signingInputDownloadStart,
+  signingReceiptDownloadStart,
+);
+const signingReceiptDownloadStep = signingJobSource.slice(
+  signingReceiptDownloadStart,
+  signingInputVerificationStart,
+);
+expect(
+  signingInputDownloadStep.includes(
+    "artifact-ids: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-artifact-id }}",
+  ) &&
+    signingInputDownloadStep.includes("path: signing-input") &&
+    signingInputDownloadStep.includes("merge-multiple: true") &&
+    !signingInputDownloadStep.includes("name: handy-api-windows"),
+  "signer must download the unsigned installer by its exact uploaded artifact ID",
+);
+expect(
+  signingReceiptDownloadStep.includes(
+    "artifact-ids: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-receipt-artifact-id }}",
+  ) &&
+    signingReceiptDownloadStep.includes("path: unsigned-receipt") &&
+    signingReceiptDownloadStep.includes("merge-multiple: true") &&
+    !signingReceiptDownloadStep.includes("name: handy-api-windows"),
+  "signer must download the durable receipt by its exact uploaded artifact ID",
+);
+
+const signingInputVerificationStep = signingJobSource.slice(
+  signingInputVerificationStart,
+  signerInstallStart,
+);
+for (const signingInputInvariant of [
+  "CANDIDATE_SHA: ${{ needs.prepare-candidate.outputs.candidate-sha }}",
+  "WORKFLOW_SOURCE_SHA: ${{ github.sha }}",
+  "UNSIGNED_ARTIFACT_ID: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-artifact-id }}",
+  "UNSIGNED_ARTIFACT_ARCHIVE_SHA256: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-artifact-digest }}",
+  "UNSIGNED_RECEIPT_ARTIFACT_ID: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-receipt-artifact-id }}",
+  "UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-receipt-artifact-digest }}",
+  "$inputFiles.Count -ne 1",
+  "$inputFiles[0].Name -cne $expectedName",
+  "$receiptFiles.Count -ne 1",
+  "$receiptFiles[0].Name -cne $expectedReceiptFilename",
+  "$rawReceiptFields",
+  "$rawReceiptKinds",
+  "$actualReceiptFields.Count -ne $expectedReceiptFields.Count",
+  "Unsigned receipt numeric fields must be JSON numbers",
+  '$receipt.repository -cne "MakinaX/Handy-Api"',
+  "$receipt.github_run_id -cne [string]$env:GITHUB_RUN_ID",
+  "$receipt.candidate_sha -cne $env:CANDIDATE_SHA",
+  "$receipt.unsigned_artifact_id -cne $env:UNSIGNED_ARTIFACT_ID",
+  "$receipt.unsigned_artifact_archive_sha256 -cne",
+  "$actualInstallerHash -cne $receipt.installer_sha256",
+  "$actualInstallerSize -ne [int64]$receipt.installer_size_bytes",
+  "actions/artifacts/$env:UNSIGNED_ARTIFACT_ID",
+  "actions/artifacts/$env:UNSIGNED_RECEIPT_ARTIFACT_ID",
+  "$unsignedArtifact.workflow_run.id",
+  "$unsignedArtifact.workflow_run.head_sha",
+  '"sha256:$($env:UNSIGNED_ARTIFACT_ARCHIVE_SHA256)"',
+  "$unsignedReceiptArtifact.workflow_run.id",
+  "$unsignedReceiptArtifact.workflow_run.head_sha",
+  '"sha256:$($env:UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256)"',
+  "HANDY_API_UNSIGNED_RECEIPT_SHA256=$unsignedReceiptHash",
+  "HANDY_API_RECEIPT_INSTALLER_SHA256=$actualInstallerHash",
+  "HANDY_API_RECEIPT_INSTALLER_SIZE=$actualInstallerSize",
+  "HANDY_API_UNSIGNED_RECEIPT_ARTIFACT_ID=",
+  "HANDY_API_UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256=",
+]) {
+  expect(
+    signingInputVerificationStep.includes(signingInputInvariant),
+    `signer unsigned receipt verification invariant is missing: ${signingInputInvariant}`,
+  );
+}
+expect(
+  /\$unsignedArtifact\.workflow_run\.head_sha\s+-cne\s+\$env:WORKFLOW_SOURCE_SHA\s+-or/.test(
+    signingInputVerificationStep,
+  ) &&
+    /\$unsignedReceiptArtifact\.workflow_run\.head_sha\s+-cne\s+\$env:WORKFLOW_SOURCE_SHA\s+-or/.test(
+      signingInputVerificationStep,
+    ),
+  "artifact API head SHA must be compared exactly to the workflow source SHA",
+);
+const unsignedApiReadback = signingInputVerificationStep.indexOf(
+  "$unsignedArtifact = Invoke-RestMethod",
+);
+const unsignedReceiptApiReadback = signingInputVerificationStep.indexOf(
+  "$unsignedReceiptArtifact = Invoke-RestMethod",
+);
+const candidateConfigRead =
+  signingInputVerificationStep.indexOf("$configUri =");
+expect(
+  unsignedApiReadback >= 0 &&
+    unsignedReceiptApiReadback > unsignedApiReadback &&
+    candidateConfigRead > unsignedReceiptApiReadback,
+  "artifact API metadata read-back must complete before candidate public-key data is read",
+);
+
+const signerCommandStep = signingJobSource.slice(
+  signerCommandStart,
+  signatureVerificationStart,
+);
+const preSignInventory = signerCommandStep.indexOf("$preSignFiles = @(");
+const preSignHash = signerCommandStep.indexOf("$preSignHash = (");
+const preSignSize = signerCommandStep.indexOf("$preSignSize = [int64]");
+const preSignReceiptGate = signerCommandStep.indexOf(
+  "$preSignHash -cne $env:HANDY_API_RECEIPT_INSTALLER_SHA256",
+);
+const tauriSignCommand = signerCommandStep.indexOf(
+  "& $env:TAURI_SIGNER_EXE signer sign $installer",
+);
+const postSignHash = signerCommandStep.indexOf("$postSignHash = (");
+const postSignSize = signerCommandStep.indexOf("$postSignSize = [int64]");
+const byteInvarianceGate = signerCommandStep.indexOf(
+  "$postSignHash -cne $preSignHash",
+);
+const postSignInventory = signerCommandStep.indexOf("$postSignFiles = @(");
+expect(
+  preSignInventory >= 0 &&
+    preSignHash > preSignInventory &&
+    preSignSize > preSignHash &&
+    preSignReceiptGate > preSignSize &&
+    tauriSignCommand > preSignReceiptGate &&
+    postSignHash > tauriSignCommand &&
+    postSignSize > postSignHash &&
+    byteInvarianceGate > postSignSize &&
+    postSignInventory > byteInvarianceGate &&
+    signerCommandStep.includes("$postSignSize -ne $preSignSize") &&
+    signerCommandStep.includes("$postSignFiles.Count -ne 2") &&
+    signerCommandStep.includes(
+      "Tauri signer must add only the exact non-empty .sig file",
+    ),
+  "Tauri signing pre/post hash, size, and exact-new-file gates are incomplete or out of order",
+);
+
+const signatureVerificationStep = signingJobSource.slice(
+  signatureVerificationStart,
+  signedArtifactUploadStart,
+);
+expect(
+  signatureVerificationStep.includes("id: verify-signed") &&
+    signatureVerificationStep.includes("$signedFiles.Count -ne 2") &&
+    signatureVerificationStep.includes(
+      "$measurements.post_sign_installer_sha256 -cne",
+    ) &&
+    signatureVerificationStep.includes(
+      "Cryptographic updater signature verification failed",
+    ) &&
+    signatureVerificationStep.includes('"installer-filename=$expectedName"') &&
+    signatureVerificationStep.includes(
+      '"installer-size-bytes=$currentInstallerSize"',
+    ) &&
+    signatureVerificationStep.includes(
+      '"pre-sign-installer-sha256=$($measurements.pre_sign_installer_sha256)"',
+    ) &&
+    signatureVerificationStep.includes(
+      '"post-sign-installer-sha256=$($measurements.post_sign_installer_sha256)"',
+    ) &&
+    signatureVerificationStep.includes(
+      '"signature-filename=$expectedName.sig"',
+    ) &&
+    signatureVerificationStep.includes('"signature-sha256=$signatureHash"'),
+  "verified signed evidence outputs must follow byte and cryptographic signature gates",
+);
+
+const signedArtifactUploadStep = signingJobSource.slice(
+  signedArtifactUploadStart,
+  signingReceiptCreationStart,
+);
+const signingReceiptCreationStep = signingJobSource.slice(
+  signingReceiptCreationStart,
+  signingReceiptUploadStart,
+);
+for (const signingReceiptInvariant of [
+  "CANDIDATE_SHA: ${{ needs.prepare-candidate.outputs.candidate-sha }}",
+  "INSTALLER_FILENAME: ${{ steps.verify-signed.outputs.installer-filename }}",
+  "INSTALLER_SIZE_BYTES: ${{ steps.verify-signed.outputs.installer-size-bytes }}",
+  "PRE_SIGN_INSTALLER_SHA256: ${{ steps.verify-signed.outputs.pre-sign-installer-sha256 }}",
+  "POST_SIGN_INSTALLER_SHA256: ${{ steps.verify-signed.outputs.post-sign-installer-sha256 }}",
+  "SIGNATURE_FILENAME: ${{ steps.verify-signed.outputs.signature-filename }}",
+  "SIGNATURE_SHA256: ${{ steps.verify-signed.outputs.signature-sha256 }}",
+  "SIGNED_ARTIFACT_NAME: handy-api-windows-x64-signed-${{ needs.prepare-candidate.outputs.fork-version }}",
+  "SIGNED_ARTIFACT_ID: ${{ steps.upload-signed.outputs.artifact-id }}",
+  "SIGNED_ARTIFACT_ARCHIVE_SHA256: ${{ steps.upload-signed.outputs.artifact-digest }}",
+  "$env:SIGNED_ARTIFACT_ID -notmatch '^[1-9][0-9]*$'",
+  "$env:SIGNED_ARTIFACT_ARCHIVE_SHA256 -notmatch",
+  "$signedFiles.Count -ne 2",
+  "$installerHash -cne $env:PRE_SIGN_INSTALLER_SHA256",
+  "$installerHash -cne $env:POST_SIGN_INSTALLER_SHA256",
+  "$signatureHash -cne $env:SIGNATURE_SHA256",
+  "$unsignedReceiptHash -cne $env:HANDY_API_UNSIGNED_RECEIPT_SHA256",
+  "$signingReceipt = [ordered]@{",
+  "signed_artifact_name = $expectedSignedArtifactName",
+  "signed_artifact_id = $env:SIGNED_ARTIFACT_ID",
+  "signed_artifact_archive_sha256 =",
+  "$env:SIGNED_ARTIFACT_ARCHIVE_SHA256",
+  "unsigned_receipt_artifact_name =",
+  "unsigned_receipt_artifact_id =",
+  "$env:HANDY_API_UNSIGNED_RECEIPT_ARTIFACT_ID",
+  "unsigned_receipt_artifact_archive_sha256 =",
+  "$env:HANDY_API_UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256",
+  "unsigned_receipt_filename =",
+  "unsigned_receipt_sha256 = $unsignedReceiptHash",
+  "pre_sign_installer_sha256 = $installerHash",
+  "post_sign_installer_sha256 = $installerHash",
+  "installer_size_bytes = $installerSize",
+  "signature_filename = $expectedSignatureName",
+  "signature_sha256 = $signatureHash",
+  "byte_invariance = $true",
+  "cryptographic_signature_verified = $true",
+  "$signingReceiptFiles.Count -ne 1",
+  "$rawKinds",
+  "$actualFields.Count -ne $expectedFields.Count",
+  "Signing receipt typed fields are invalid",
+  "$signingReceiptReadback.signed_artifact_name -cne",
+  "$signingReceiptReadback.signed_artifact_id -cne",
+  "$signingReceiptReadback.signed_artifact_archive_sha256 -cne",
+  "$signingReceiptReadback.unsigned_receipt_artifact_id -cne",
+  "$signingReceiptReadback.unsigned_receipt_artifact_archive_sha256 -cne",
+  "$signingReceiptReadback.pre_sign_installer_sha256 -cne",
+  "$signingReceiptReadback.post_sign_installer_sha256 -cne",
+  "$signingReceiptReadback.byte_invariance -cne $true",
+  "$signingReceiptReadback.cryptographic_signature_verified -cne",
+]) {
+  expect(
+    signingReceiptCreationStep.includes(signingReceiptInvariant),
+    `durable signing receipt invariant is missing: ${signingReceiptInvariant}`,
+  );
+}
+
+const signingReceiptUploadStep = signingJobSource.slice(
+  signingReceiptUploadStart,
+);
+expect(
+  signedArtifactUploadStep.includes("id: upload-signed") &&
+    signedArtifactUploadStep.includes(
+      "signed-assets/Handy.API_${{ needs.prepare-candidate.outputs.fork-version }}_x64-setup.exe",
+    ) &&
+    signedArtifactUploadStep.includes(
+      "signed-assets/Handy.API_${{ needs.prepare-candidate.outputs.fork-version }}_x64-setup.exe.sig",
+    ) &&
+    !signedArtifactUploadStep.includes("receipt"),
+  "signed acceptance artifact must contain only installer and signature",
+);
+expect(
+  signingReceiptUploadStep.includes("id: upload-signing-receipt") &&
+    signingReceiptUploadStep.includes(
+      "path: signing-receipt/handy-api-windows-x64-signing-receipt.json",
+    ) &&
+    !signingReceiptUploadStep.includes("signed-assets/"),
+  "signing receipt must be uploaded as a separate evidence artifact",
+);
+
+const publishReleaseJob = upstreamSync.match(
+  /\n  publish-release:\n([\s\S]*)$/,
+)?.[1];
+const publishReleaseJobSource = publishReleaseJob ?? "";
+const signedReleaseDownloadStart = publishReleaseJobSource.indexOf(
+  "- name: Download verified release inputs",
+);
+const unsignedReleaseReceiptDownloadStart = publishReleaseJobSource.indexOf(
+  "- name: Download unsigned release receipt",
+);
+const signingReleaseReceiptDownloadStart = publishReleaseJobSource.indexOf(
+  "- name: Download signing release receipt",
+);
+const releaseManifestStart = publishReleaseJobSource.indexOf(
+  "- name: Build and verify updater manifest",
+);
+const releaseUploadStart = publishReleaseJobSource.indexOf(
+  "- name: Create non-public draft and upload exact assets",
+);
+const releaseInventoryStart = publishReleaseJobSource.indexOf(
+  "- name: Verify draft inventory and uploaded bytes",
+);
+const releasePublishStart = publishReleaseJobSource.indexOf(
+  "- name: Fast-forward main and publish verified draft",
+);
+expect(
+  signedReleaseDownloadStart >= 0 &&
+    unsignedReleaseReceiptDownloadStart > signedReleaseDownloadStart &&
+    signingReleaseReceiptDownloadStart > unsignedReleaseReceiptDownloadStart &&
+    releaseManifestStart > signingReleaseReceiptDownloadStart &&
+    releaseUploadStart > releaseManifestStart &&
+    releaseInventoryStart > releaseUploadStart &&
+    releasePublishStart > releaseInventoryStart,
+  "production receipt verification and public release steps are missing or out of order",
+);
+
+const signedReleaseDownloadStep = publishReleaseJobSource.slice(
+  signedReleaseDownloadStart,
+  unsignedReleaseReceiptDownloadStart,
+);
+const unsignedReleaseReceiptDownloadStep = publishReleaseJobSource.slice(
+  unsignedReleaseReceiptDownloadStart,
+  signingReleaseReceiptDownloadStart,
+);
+const signingReleaseReceiptDownloadStep = publishReleaseJobSource.slice(
+  signingReleaseReceiptDownloadStart,
+  releaseManifestStart,
+);
+expect(
+  signedReleaseDownloadStep.includes(
+    "artifact-ids: ${{ needs.sign-windows-updater.outputs.signed-artifact-id }}",
+  ) &&
+    signedReleaseDownloadStep.includes("path: release-assets") &&
+    signedReleaseDownloadStep.includes("merge-multiple: true"),
+  "production must download signed inputs by the exact signer artifact ID",
+);
+expect(
+  unsignedReleaseReceiptDownloadStep.includes(
+    "artifact-ids: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-receipt-artifact-id }}",
+  ) &&
+    unsignedReleaseReceiptDownloadStep.includes("path: unsigned-receipt") &&
+    unsignedReleaseReceiptDownloadStep.includes("merge-multiple: true") &&
+    signingReleaseReceiptDownloadStep.includes(
+      "artifact-ids: ${{ needs.sign-windows-updater.outputs.signing-receipt-artifact-id }}",
+    ) &&
+    signingReleaseReceiptDownloadStep.includes("path: signing-receipt") &&
+    signingReleaseReceiptDownloadStep.includes("merge-multiple: true"),
+  "production must download both evidence receipts by exact artifact IDs into non-public directories",
+);
+
+const releaseManifestStep = publishReleaseJobSource.slice(
+  releaseManifestStart,
+  releaseUploadStart,
+);
+for (const productionReceiptInvariant of [
+  "signing_inputs=(release-assets/*)",
+  "[[ ${#signing_inputs[@]} -ne 2 ]]",
+  '[[ "$(find unsigned-receipt -type f | wc -l)" -eq 1 ]]',
+  '[[ "$(find signing-receipt -type f | wc -l)" -eq 1 ]]',
+  'unsigned_receipt_sha="$(sha256sum "$unsigned_receipt"',
+  'installer_sha="$(sha256sum "$installer"',
+  'signature_sha="$(sha256sum "$signature_file"',
+  "UNSIGNED_ARTIFACT_ID: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-artifact-id }}",
+  "UNSIGNED_ARTIFACT_ARCHIVE_SHA256: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-artifact-digest }}",
+  '--arg artifact_id "$UNSIGNED_ARTIFACT_ID"',
+  '--arg artifact_digest "$UNSIGNED_ARTIFACT_ARCHIVE_SHA256"',
+  ".unsigned_artifact_id == $artifact_id",
+  ".unsigned_artifact_archive_sha256 == $artifact_digest",
+  "UNSIGNED_RECEIPT_ARTIFACT_ID: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-receipt-artifact-id }}",
+  "UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-receipt-artifact-digest }}",
+  '--arg receipt_artifact_id "$UNSIGNED_RECEIPT_ARTIFACT_ID"',
+  '--arg receipt_artifact_digest "$UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256"',
+  "SIGNED_ARTIFACT_ID: ${{ needs.sign-windows-updater.outputs.signed-artifact-id }}",
+  "SIGNED_ARTIFACT_ARCHIVE_SHA256: ${{ needs.sign-windows-updater.outputs.signed-artifact-digest }}",
+  'signed_artifact_name="handy-api-windows-x64-signed-${FORK_VERSION}"',
+  '--arg signed_artifact "$signed_artifact_name"',
+  '--arg signed_artifact_id "$SIGNED_ARTIFACT_ID"',
+  '--arg signed_artifact_digest "$SIGNED_ARTIFACT_ARCHIVE_SHA256"',
+  ".signed_artifact_name == $signed_artifact",
+  ".signed_artifact_id == $signed_artifact_id",
+  ".signed_artifact_archive_sha256 == $signed_artifact_digest",
+  ".unsigned_receipt_artifact_id == $receipt_artifact_id",
+  ".unsigned_receipt_artifact_archive_sha256 ==",
+  ".unsigned_receipt_sha256 == $receipt_sha",
+  ".pre_sign_installer_sha256 == $installer_sha",
+  ".post_sign_installer_sha256 == $installer_sha",
+  ".installer_size_bytes == $size",
+  ".signature_sha256 == $signature_sha",
+  ".byte_invariance == true",
+  ".cryptographic_signature_verified == true",
+  "> release-assets/latest.json",
+]) {
+  expect(
+    releaseManifestStep.includes(productionReceiptInvariant),
+    `production receipt/release contract invariant is missing: ${productionReceiptInvariant}`,
+  );
+}
+
+const releaseUploadStep = publishReleaseJobSource.slice(
+  releaseUploadStart,
+  releaseInventoryStart,
+);
+expect(
+  releaseUploadStep.includes(
+    '"release-assets/Handy.API_${FORK_VERSION}_x64-setup.exe"',
+  ) &&
+    releaseUploadStep.includes(
+      '"release-assets/Handy.API_${FORK_VERSION}_x64-setup.exe.sig"',
+    ) &&
+    releaseUploadStep.includes("release-assets/latest.json") &&
+    !releaseUploadStep.includes("unsigned-receipt") &&
+    !releaseUploadStep.includes("signing-receipt") &&
+    !releaseUploadStep.includes("receipt.json"),
+  "public upload command must expose only installer, signature, and latest.json",
+);
+
+const releaseInventoryStep = publishReleaseJobSource.slice(
+  releaseInventoryStart,
+  releasePublishStart,
+);
+expect(
+  releaseInventoryStep.includes(
+    '([$installer, ($installer + ".sig"), "latest.json"] | sort)',
+  ) &&
+    releaseInventoryStep.includes(
+      "[[ ${#local_assets[@]} -ne 3 || ${#uploaded_assets[@]} -ne 3 ]]",
+    ) &&
+    releaseInventoryStep.includes("cmp --silent"),
+  "draft read-back must prove the exact three-file public inventory and byte equality",
 );
 expect(
   (upstreamSync.match(/secrets\.TAURI_SIGNING_PRIVATE_KEY/g)?.length ?? 0) ===

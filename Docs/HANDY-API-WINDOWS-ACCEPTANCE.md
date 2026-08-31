@@ -13,6 +13,20 @@ unit-test pass alone is not acceptance.
 
 ## Evidence rules
 
+Keep Actions evidence separate from public release assets and require these
+exact inventories:
+
+| Evidence or release object                         | Exact inventory                                         |
+| -------------------------------------------------- | ------------------------------------------------------- |
+| `handy-api-windows-x64-unsigned-<version>`         | one canonical installer EXE                             |
+| `handy-api-windows-x64-unsigned-receipt-<version>` | one `handy-api-windows-x64-unsigned-receipt.json`       |
+| `handy-api-windows-x64-signed-<version>`           | the same installer EXE plus its exact `.sig`            |
+| `handy-api-windows-x64-signing-receipt-<version>`  | one `handy-api-windows-x64-signing-receipt.json`        |
+| final public release                               | installer EXE, installer `.sig`, and `latest.json` only |
+
+The receipt JSON files are Actions evidence only. They must never appear in the
+three-asset public release.
+
 - [ ] Create one evidence directory named
       `handy-api-<version>-windows-acceptance`.
 - [ ] Record the tester, UTC start/end time, Windows build, CPU/GPU, microphone,
@@ -21,12 +35,20 @@ unit-test pass alone is not acceptance.
 - [ ] Record the successful CI URL and the upstream-sync URL that produced the
       exact acceptance artifact. Export the job summaries/logs and, after
       approval, the release's exact three-asset inventory.
+- [ ] Record every Actions artifact name, numeric artifact ID, API archive
+      `size_in_bytes`, and archive SHA-256 digest. Record the SHA-256 of each
+      downloaded receipt JSON as a separate file identity.
 - [ ] Record SHA-256 for the downloaded installer, its `.sig`, `latest.json`,
       and the installed `handy-api.exe`:
 
   ```powershell
   Get-FileHash -Algorithm SHA256 <path> | Format-List Path, Hash
   ```
+
+- [ ] Do not treat GitHub artifact `size_in_bytes` as installer size. It is the
+      uploaded archive size. Independently record the inner EXE byte length and
+      SHA-256 and compare those values to `installer_size_bytes` and
+      `installer_sha256` in the unsigned receipt.
 
 - [ ] Save a case receipt for every test: case ID, backend/model, Gemini
       mode/language, input/fixture SHA-256, repetitions, start/end time,
@@ -55,44 +77,96 @@ unit-test pass alone is not acceptance.
 - [ ] `handy-api-ci.yml` completed successfully for the exact candidate,
       including its Nix evaluation/package build. The upstream-sync candidate
       gates, release contract, unsigned exact Windows build, installed-runtime
-      smoke, and unsigned artifact upload succeeded. The signer job is waiting
-      for `handy-api-signing`; capture URLs and SHA with:
+      smoke, one-EXE unsigned artifact upload, and separate one-JSON unsigned
+      receipt upload succeeded. The signer job is waiting for
+      `handy-api-signing`; capture URLs, SHA, and artifact API metadata with:
 
   ```powershell
   gh run list --repo MakinaX/Handy-Api --limit 20
   gh run view <run-id> --repo MakinaX/Handy-Api `
     --json url,headSha,conclusion,workflowName
+  gh api "repos/MakinaX/Handy-Api/actions/runs/<run-id>/artifacts?per_page=100"
   ```
 
-- [ ] Review the tested candidate SHA, all automated gate receipts, and the
-      unsigned installer hash. Approve `handy-api-signing` only for that exact
-      run, and record reviewer identity plus UTC approval time. Confirm the
+- [ ] Before any signing approval, download the unsigned installer artifact and
+      unsigned receipt artifact into separate directories. Confirm that the
+      former contains exactly one canonical EXE and the latter exactly one
+      bounded JSON receipt:
+
+  ```powershell
+  $Repo = "MakinaX/Handy-Api"
+  $RunId = "<run-id>"
+  $Version = "<fork-version>"
+  $UnsignedArtifact = "handy-api-windows-x64-unsigned-$Version"
+  $UnsignedReceiptArtifact = "handy-api-windows-x64-unsigned-receipt-$Version"
+
+  gh run download $RunId --repo $Repo `
+    --name $UnsignedArtifact --dir ".\unsigned-artifact"
+  gh run download $RunId --repo $Repo `
+    --name $UnsignedReceiptArtifact --dir ".\unsigned-receipt-artifact"
+  Get-ChildItem ".\unsigned-artifact" -Recurse -File
+  Get-ChildItem ".\unsigned-receipt-artifact" -Recurse -File
+  ```
+
+- [ ] Parse the unsigned receipt and require the exact repository, run ID,
+      candidate SHA, fork version, unsigned artifact name, artifact ID, archive
+      digest, installer filename, installer byte length, and installer SHA-256.
+      Compare artifact ID/digest with the GitHub API read-back, normalizing only
+      the API's `sha256:` prefix. Independently hash and measure the downloaded
+      inner EXE and require exact equality with the receipt. Preserve both the
+      receipt JSON SHA-256 and its own Actions artifact ID/archive digest.
+- [ ] Mark `SIGNING APPROVAL READY` only after that Director-side download and
+      comparison passes. Reaching the environment wait or trusting workflow log
+      output alone is insufficient. For the currently authorized phase, stop
+      at the unapproved gate even if every unsigned check passes; approval
+      requires a separate decision.
+- [ ] In a later authorized phase, approve `handy-api-signing` only for that
+      exact run and record reviewer identity plus UTC approval time. Confirm the
       signing job had no candidate checkout or candidate code execution; only
       its single signer step received the environment secrets.
 - [ ] The no-checkout signer installed exact Tauri CLI 2.11.4, produced the
-      exact `.sig`, verified it against the committed public key with the
-      digest-pinned Minisign verifier, and uploaded the signed artifact. The
-      same run's publish job is now waiting for the independent
-      `handy-api-production` approval.
+      exact `.sig`, and added no other file. Its explicit gate proves that the
+      installer's SHA-256 and byte size immediately before signing equal both
+      values immediately after signing. A later secret-free step rechecks that
+      invariance and verifies the signature against the committed public key
+      with the digest-pinned Minisign verifier.
+- [ ] After cryptographic verification, the workflow uploaded the exact
+      two-file signed artifact and separate one-JSON signing receipt. The
+      signing receipt binds the signed artifact name/ID/archive digest, the
+      unsigned receipt artifact name/ID/archive digest and receipt-file SHA-256,
+      equal pre/post installer hashes, inner installer size, signature
+      filename/hash, `byte_invariance: true`, and
+      `cryptographic_signature_verified: true`. The same run's publish job is
+      now waiting for the independent `handy-api-production` approval.
 
-- [ ] While that exact run is waiting, download its artifact without approving
-      production. Record the run ID, artifact name, candidate SHA, version,
-      exact installer name, installer hash, and signature-file hash:
+- [ ] While that exact run is waiting, download both the signed artifact and
+      signing receipt artifact without approving production. Record the run ID,
+      both artifact names/IDs/archive digests, candidate SHA, version, exact
+      installer name/size/hash, signature filename/hash, and both receipt-file
+      hashes:
 
   ```powershell
   $RunId = "<run-id>"
   $Version = "<fork-version>"
   $Artifact = "handy-api-windows-x64-signed-$Version"
+  $ReceiptArtifact = "handy-api-windows-x64-signing-receipt-$Version"
   gh run download $RunId --repo MakinaX/Handy-Api `
     --name $Artifact --dir ".\acceptance-artifact"
+  gh run download $RunId --repo MakinaX/Handy-Api `
+    --name $ReceiptArtifact --dir ".\signing-receipt-artifact"
   Get-ChildItem ".\acceptance-artifact" -File
-  Get-FileHash -Algorithm SHA256 ".\acceptance-artifact\*"
+  Get-ChildItem ".\signing-receipt-artifact" -File
+  Get-FileHash -Algorithm SHA256 `
+    ".\acceptance-artifact\*", ".\signing-receipt-artifact\*"
   ```
 
 - [ ] The downloaded pre-production artifact contains exactly
       `Handy.API_<version>_x64-setup.exe` and its exact matching `.sig`, with no
-      foreign or extra installer. `latest.json` is expected only after the
-      protected production job is approved.
+      foreign or extra installer. The signing-receipt artifact contains exactly
+      its JSON file, and every signing-receipt identity/measurement matches the
+      downloaded files, unsigned receipt, and GitHub API metadata.
+      `latest.json` is expected only after the protected production job is
+      approved.
 - [ ] The test machine has a snapshot/backup, working physical microphone,
       network access, a disposable Gemini API key with quota, a local
       Whisper-family model including Large V3, Notepad, and a local HTTPS
@@ -327,9 +401,11 @@ Use a fresh Notepad marker and pre/post counters for every repetition.
 
 - [ ] Every row is executed with a receipt and all required outcomes pass.
 - [ ] CI/workflow URLs, waiting-run artifact identity, separate signing and
-      production approval receipts, tested candidate SHA, release version, four
-      release/file SHA-256 values, redacted logs, screenshots/video, corpus
-      transcripts, and pre/post counters are present in the evidence directory.
+      production approval receipts, both machine-readable workflow receipts,
+      every Actions artifact ID/archive digest, tested candidate SHA, release
+      version, inner installer size/hash, signature and receipt-file hashes,
+      redacted logs, screenshots/video, corpus transcripts, and pre/post
+      counters are present in the evidence directory.
 - [ ] Any failure is linked to a tracked defect and the release remains draft
       or unpromoted. Do not call the fork complete while any required row is
       `NOT EXECUTED` or failed.

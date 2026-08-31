@@ -14,6 +14,9 @@ secret registration, and initial push are complete. Treat the corresponding
 commands below as recovery/read-back instructions: do not regenerate the
 keypair or repeat secret mutations without a new, specific authorization. The
 current closure attempt must stop before approving `handy-api-signing`.
+Superseded upstream-sync run `33308322090` was cancelled without approval
+because its unsigned installer predates the durable receipt and signer
+byte-invariance gates. Its queued old-source successor was cancelled first.
 
 ## 1. Verify authentication and the safe remote layout
 
@@ -204,22 +207,74 @@ bun scripts/check-handy-api-release.ts \
   --repository "$fork_repo"
 ```
 
-After adding only the public key, release mode must pass. Commit the audited
-public configuration and evidence without adding either signing secret:
+After adding only the public key, release mode must pass. For the current
+blocked-run transition, validate the receipt rootfix locally, but do not commit
+or push it until the cancellation subsection below has passed and its durable
+receipt can be included in the same commit:
 
 ```bash
 bun scripts/check-handy-api-release.ts \
   --release \
   --repository "$fork_repo"
+bun scripts/handy-api-receipt-contract.test.ts
+git diff --check
+```
 
+### Completed replacement of the blocked old-source runs
+
+The current transition has two runs bound to workflow source commit
+`62c4947a36d3774527042da2776ff66d047002cd`:
+
+- manually dispatched run `33308322090` reached `handy-api-signing` but was
+  never approved. It was cancelled `completed/cancelled` with no signer runner,
+  steps, secret access, or signing command.
+- scheduled run `33340123965` was pending behind the same concurrency group and
+  had not started any job. Because `cancel-in-progress: false`, it was cancelled
+  **first**, then read back as `completed/cancelled` with zero jobs, approvals,
+  or artifacts.
+
+The receipt rootfix was prepared and locally validated before either
+cancellation. Both GitHub mutations were performed from the trusted,
+authenticated Director machine in this exact order:
+
+```bash
+# Historical completed sequence; do not rerun these cancellation commands.
+gh run cancel 33340123965 --repo "$fork_repo"
+gh run view 33340123965 --repo "$fork_repo" \
+  --json status,conclusion,headSha,url
+
+gh run cancel 33308322090 --repo "$fork_repo"
+gh run view 33308322090 --repo "$fork_repo" \
+  --json status,conclusion,headSha,url
+```
+
+Those read-backs passed. The workflow-run approval history, jobs, artifacts,
+production deployments, Git tags, and releases were rechecked afterward. For
+`33308322090`, the retained facts are zero signing approvals, signer steps,
+signing-secret access, signing commands, production runners/steps/deployments,
+tags, and releases. Both cancellations and those retained facts are recorded
+in `Docs/HANDY-API-SIGNING-ROOTFIX-RECEIPT.json`. The exact validated rootfix may
+now be committed and pushed:
+
+```bash
 git add -- \
-  src-tauri/tauri.conf.json \
+  .github/workflows/handy-api-ci.yml \
+  .github/workflows/upstream-sync.yml \
+  Docs/HANDY-API-IMPLEMENTATION-REPORT.md \
   Docs/HANDY-API-ONE-TIME-SETUP.md \
-  Docs/HANDY-API-IMPLEMENTATION-REPORT.md
-git commit -m "chore: bind Handy API updater identity"
+  Docs/HANDY-API-SIGNING-ROOTFIX-RECEIPT.json \
+  Docs/HANDY-API-WINDOWS-ACCEPTANCE.md \
+  scripts/check-handy-api-release.ts \
+  scripts/handy-api-receipt-contract.test.ts \
+  scripts/handy-api-receipt-contract.ts
+git diff --cached --check
+git commit -m "fix: bind updater signing to durable receipts"
 closure_sha="$(git rev-parse HEAD)"
 git push origin HEAD:main
 ```
+
+Read back the exact remote `main` SHA and wait for its push-owned
+`handy-api-ci.yml` run before dispatching a replacement upstream-sync run.
 
 The initial `main` push starts `handy-api-ci.yml` automatically. Do not dispatch
 a duplicate manual run: both runs share a cancellation-enabled concurrency
@@ -262,14 +317,57 @@ gh workflow run upstream-sync.yml --repo "$fork_repo" --ref main
 ```
 
 Open that run in GitHub Actions. First wait for the unsigned Windows build and
-all frontend, Rust, Nix, and release-contract gates to pass. Review the exact
-candidate SHA and unsigned artifact receipt, then approve
-`handy-api-signing`. After the isolated signer succeeds, `publish-release`
-waits on the independent `handy-api-production` environment. Download
-`handy-api-windows-x64-signed-<version>` and complete
-`Docs/HANDY-API-WINDOWS-ACCEPTANCE.md`. Only after every blocking check is
-recorded as PASS should the Director approve production and wait for the same
-run to finish:
+all frontend, Rust, Nix, and release-contract gates to pass. The build must
+upload both the exact unsigned input and its separate durable receipt. Stop at
+the unapproved `handy-api-signing` gate for the currently authorized phase.
+Do not approve signing merely because the workflow reached that gate.
+
+The Actions and public-release inventories are disjoint and exact:
+
+| Evidence or release object                         | Exact inventory                                         |
+| -------------------------------------------------- | ------------------------------------------------------- |
+| `handy-api-windows-x64-unsigned-<version>`         | one canonical installer EXE                             |
+| `handy-api-windows-x64-unsigned-receipt-<version>` | one `handy-api-windows-x64-unsigned-receipt.json`       |
+| `handy-api-windows-x64-signed-<version>`           | the same installer EXE plus its exact `.sig`            |
+| `handy-api-windows-x64-signing-receipt-<version>`  | one `handy-api-windows-x64-signing-receipt.json`        |
+| final public release                               | installer EXE, installer `.sig`, and `latest.json` only |
+
+Neither receipt JSON is a release asset. GitHub's artifact `size_in_bytes` and
+artifact digest describe the uploaded archive. They do not replace the
+`installer_size_bytes` and `installer_sha256` measured from the EXE inside that
+archive.
+
+Before any later signing approval can be called ready, the Director must
+download the unsigned EXE artifact and unsigned receipt artifact separately.
+The Director must confirm their exact one-file inventories, verify the receipt
+repository, run ID, candidate SHA, version, artifact name, artifact ID, and
+archive SHA-256 against GitHub read-back, and independently recalculate the
+inner EXE byte size and SHA-256. The Director must also record the unsigned
+receipt artifact's own ID and archive digest from GitHub metadata and hash the
+downloaded receipt JSON. Those inner measurements must exactly equal
+`installer_size_bytes` and `installer_sha256` in the receipt. Only this
+successful local read-back can support a later `SIGNING APPROVAL READY`
+decision; it does not itself authorize approval.
+
+After a separate future authorization, the isolated signer revalidates the
+same receipt and EXE before its signing command. Immediately before and after
+Tauri signing it measures the installer SHA-256 and byte size and requires both
+pairs to be identical. The command may add exactly one non-empty `.sig` and may
+not alter the EXE or add any other file. A secret-free step then verifies the
+signature with the committed public key. Only after that verification does the
+workflow upload the exact two-file signed artifact and create the separate
+signing receipt. That receipt binds the signed artifact name, ID, and archive
+digest; the unsigned receipt artifact name, ID, archive digest, filename, and
+JSON SHA-256; the equal pre/post installer hashes and installer size; and the
+signature filename/hash, with both verification booleans true.
+
+After the isolated signer succeeds, `publish-release` waits on the independent
+`handy-api-production` environment. Download both
+`handy-api-windows-x64-signed-<version>` and
+`handy-api-windows-x64-signing-receipt-<version>`, verify the same evidence
+chain, and complete `Docs/HANDY-API-WINDOWS-ACCEPTANCE.md`. Only after every
+blocking check is recorded as PASS should the Director approve production and
+wait for the same run to finish:
 
 ```bash
 release_run_id="$(gh run list \
@@ -301,17 +399,25 @@ The sync workflow enforces this order before publication:
    exact Tauri raw filename `Handy API_<version>_x64-setup.exe`, then renames
    that unchanged byte stream to the canonical public filename
    `Handy.API_<version>_x64-setup.exe` before smoke and upload;
-4. Director approval of the independent `handy-api-signing` environment;
-5. no-checkout Tauri CLI 2.11.4 signing of only
-   `Handy.API_<version>_x64-setup.exe`, followed by secret-free Minisign
-   verification against the exact candidate's committed public key;
-6. protected `handy-api-production` wait while that exact signed artifact
+4. separate upload of the one-EXE unsigned artifact and the one-JSON unsigned
+   receipt artifact, with artifact ID/archive digest and inner EXE size/hash
+   bound in the receipt;
+5. Director download and independent read-back of both unsigned artifacts,
+   followed by a stop at the unapproved `handy-api-signing` environment;
+6. after separate authorization, signer-side exact receipt/input verification
+   before any signing secret is used;
+7. no-checkout Tauri CLI 2.11.4 signing of only
+   `Handy.API_<version>_x64-setup.exe`, with explicit pre/post EXE hash and size
+   invariance, followed by secret-free Minisign verification;
+8. upload of the exact two-file signed artifact and separate one-JSON signing
+   receipt artifact;
+9. protected `handy-api-production` wait while that exact signed artifact
    undergoes the Windows acceptance matrix;
-7. separate Director production approval after evidence is recorded;
-8. non-public draft creation, exact three-asset upload, and remote byte
-   read-back;
-9. `main` fast-forward; and
-10. draft publication as the final release mutation.
+10. separate Director production approval after evidence is recorded;
+11. non-public draft creation, exact three-asset upload, and remote byte
+    read-back;
+12. `main` fast-forward; and
+13. draft publication as the final release mutation.
 
 Every complete release has exactly
 `Handy.API_<version>_x64-setup.exe`, its exact matching `.sig`, and

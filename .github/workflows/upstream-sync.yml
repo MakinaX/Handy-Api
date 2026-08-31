@@ -290,6 +290,11 @@ jobs:
       - release-contract
     if: needs.prepare-candidate.outputs.update-required == 'true'
     runs-on: windows-latest
+    outputs:
+      unsigned-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+      unsigned-artifact-digest: ${{ steps.upload-unsigned.outputs.artifact-digest }}
+      unsigned-receipt-artifact-id: ${{ steps.upload-unsigned-receipt.outputs.artifact-id }}
+      unsigned-receipt-artifact-digest: ${{ steps.upload-unsigned-receipt.outputs.artifact-digest }}
     permissions:
       contents: read
     steps:
@@ -375,7 +380,9 @@ jobs:
           -- --locked
 
       - name: Verify exact unsigned updater output and runtime
+        id: verify-unsigned
         env:
+          CANDIDATE_SHA: ${{ needs.prepare-candidate.outputs.candidate-sha }}
           FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
         shell: pwsh
         run: |
@@ -480,13 +487,136 @@ jobs:
           if ($stagedHash -cne $generatedHash) {
             throw "Staged unsigned installer bytes do not match the verified build"
           }
+          $stagedInstaller = Get-Item -LiteralPath $stagedPath
+          if ($env:GITHUB_REPOSITORY -cne "MakinaX/Handy-Api" -or
+              $env:GITHUB_RUN_ID -notmatch '^[1-9][0-9]*$' -or
+              $env:CANDIDATE_SHA -notmatch '^[0-9a-f]{40}$' -or
+              $env:FORK_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+-api\.[0-9]+$') {
+            throw "Unsigned receipt identity inputs are invalid"
+          }
+          $stagedHash = $stagedHash.ToLowerInvariant()
+          Add-Content -Path $env:GITHUB_OUTPUT -Value `
+            "installer-filename=$expectedName"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value `
+            "installer-size-bytes=$([int64]$stagedInstaller.Length)"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value `
+            "installer-sha256=$stagedHash"
           Get-FileHash -LiteralPath $stagedPath -Algorithm SHA256 | Format-List
 
       - name: Upload exact unsigned signing input
+        id: upload-unsigned
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: handy-api-windows-x64-unsigned-${{ needs.prepare-candidate.outputs.fork-version }}
           path: unsigned-assets/Handy.API_${{ needs.prepare-candidate.outputs.fork-version }}_x64-setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create durable unsigned receipt
+        env:
+          CANDIDATE_SHA: ${{ needs.prepare-candidate.outputs.candidate-sha }}
+          FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
+          INSTALLER_FILENAME: ${{ steps.verify-unsigned.outputs.installer-filename }}
+          INSTALLER_SIZE_BYTES: ${{ steps.verify-unsigned.outputs.installer-size-bytes }}
+          INSTALLER_SHA256: ${{ steps.verify-unsigned.outputs.installer-sha256 }}
+          UNSIGNED_ARTIFACT_ID: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          UNSIGNED_ARTIFACT_ARCHIVE_SHA256: ${{ steps.upload-unsigned.outputs.artifact-digest }}
+          UNSIGNED_ARTIFACT_NAME: handy-api-windows-x64-unsigned-${{ needs.prepare-candidate.outputs.fork-version }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedName = "Handy.API_$($env:FORK_VERSION)_x64-setup.exe"
+          if ($env:GITHUB_REPOSITORY -cne "MakinaX/Handy-Api" -or
+              $env:GITHUB_RUN_ID -notmatch '^[1-9][0-9]*$' -or
+              $env:CANDIDATE_SHA -notmatch '^[0-9a-f]{40}$' -or
+              $env:FORK_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+-api\.[0-9]+$' -or
+              $env:INSTALLER_FILENAME -cne $expectedName -or
+              $env:INSTALLER_SIZE_BYTES -notmatch '^[1-9][0-9]*$' -or
+              $env:INSTALLER_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+              $env:UNSIGNED_ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or
+              $env:UNSIGNED_ARTIFACT_ARCHIVE_SHA256 -notmatch '^[0-9a-f]{64}$') {
+            throw "Unsigned receipt inputs are invalid"
+          }
+          $stagedPath = Join-Path "unsigned-assets" $expectedName
+          $stagedInstaller = Get-Item -LiteralPath $stagedPath
+          $stagedHash = (Get-FileHash -LiteralPath $stagedPath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($stagedInstaller.Length -ne [int64]$env:INSTALLER_SIZE_BYTES -or
+              $stagedHash -cne $env:INSTALLER_SHA256) {
+            throw "Uploaded installer source no longer matches verified build outputs"
+          }
+
+          $receiptDirectory = "unsigned-receipt"
+          $receiptFilename = "handy-api-windows-x64-unsigned-receipt.json"
+          New-Item -ItemType Directory -Path $receiptDirectory -Force | Out-Null
+          $receiptPath = Join-Path $receiptDirectory $receiptFilename
+          $receipt = [ordered]@{
+            schema_version = 1
+            repository = $env:GITHUB_REPOSITORY
+            github_run_id = [string]$env:GITHUB_RUN_ID
+            candidate_sha = $env:CANDIDATE_SHA
+            fork_version = $env:FORK_VERSION
+            unsigned_artifact_name = $env:UNSIGNED_ARTIFACT_NAME
+            unsigned_artifact_id = $env:UNSIGNED_ARTIFACT_ID
+            unsigned_artifact_archive_sha256 = $env:UNSIGNED_ARTIFACT_ARCHIVE_SHA256
+            installer_filename = $expectedName
+            installer_size_bytes = [int64]$stagedInstaller.Length
+            installer_sha256 = $stagedHash
+          }
+          $receipt | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $receiptPath `
+            -Encoding utf8NoBOM
+
+          $receiptFiles = @(Get-ChildItem $receiptDirectory -Recurse -File)
+          if ($receiptFiles.Count -ne 1 -or
+              $receiptFiles[0].Name -cne $receiptFilename) {
+            throw "Unsigned receipt artifact must contain only $receiptFilename"
+          }
+          $receiptReadback = Get-Content -LiteralPath $receiptPath -Raw |
+            ConvertFrom-Json
+          $expectedReceiptFields = @(
+            "schema_version",
+            "repository",
+            "github_run_id",
+            "candidate_sha",
+            "fork_version",
+            "unsigned_artifact_name",
+            "unsigned_artifact_id",
+            "unsigned_artifact_archive_sha256",
+            "installer_filename",
+            "installer_size_bytes",
+            "installer_sha256"
+          ) | Sort-Object -CaseSensitive
+          $actualReceiptFields = @($receiptReadback.PSObject.Properties.Name) |
+            Sort-Object -CaseSensitive
+          if ($actualReceiptFields.Count -ne $expectedReceiptFields.Count -or
+              [string]::Join("`n", $actualReceiptFields) -cne
+                [string]::Join("`n", $expectedReceiptFields) -or
+              $receiptReadback.schema_version.GetType().FullName -notin
+                @("System.Int32", "System.Int64") -or
+              [int64]$receiptReadback.schema_version -ne 1 -or
+              $receiptReadback.repository -cne $env:GITHUB_REPOSITORY -or
+              $receiptReadback.github_run_id -cne [string]$env:GITHUB_RUN_ID -or
+              $receiptReadback.candidate_sha -cne $env:CANDIDATE_SHA -or
+              $receiptReadback.fork_version -cne $env:FORK_VERSION -or
+              $receiptReadback.unsigned_artifact_name -cne $env:UNSIGNED_ARTIFACT_NAME -or
+              $receiptReadback.unsigned_artifact_id -cne $env:UNSIGNED_ARTIFACT_ID -or
+              $receiptReadback.unsigned_artifact_archive_sha256 -cne
+                $env:UNSIGNED_ARTIFACT_ARCHIVE_SHA256 -or
+              $receiptReadback.installer_filename -cne $expectedName -or
+              [int64]$receiptReadback.installer_size_bytes -ne
+                $stagedInstaller.Length -or
+              $receiptReadback.installer_sha256 -cne $stagedHash) {
+            throw "Unsigned receipt read-back does not match immutable artifact inputs"
+          }
+          Get-FileHash -LiteralPath $stagedPath, $receiptPath -Algorithm SHA256 |
+            Format-List
+
+      - name: Upload durable unsigned receipt
+        id: upload-unsigned-receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: handy-api-windows-x64-unsigned-receipt-${{ needs.prepare-candidate.outputs.fork-version }}
+          path: unsigned-receipt/handy-api-windows-x64-unsigned-receipt.json
           if-no-files-found: error
           retention-days: 14
 
@@ -498,6 +628,11 @@ jobs:
       - build-unsigned-windows-x64
     if: needs.prepare-candidate.outputs.update-required == 'true'
     runs-on: windows-latest
+    outputs:
+      signed-artifact-id: ${{ steps.upload-signed.outputs.artifact-id }}
+      signed-artifact-digest: ${{ steps.upload-signed.outputs.artifact-digest }}
+      signing-receipt-artifact-id: ${{ steps.upload-signing-receipt.outputs.artifact-id }}
+      signing-receipt-artifact-digest: ${{ steps.upload-signing-receipt.outputs.artifact-digest }}
     # This is the first point at which updater signing secrets are available.
     # The required reviewer approves the tested unsigned candidate before this
     # job starts. This job never checks out or executes candidate source: it
@@ -511,15 +646,28 @@ jobs:
       - name: Download exact unsigned signing input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: handy-api-windows-x64-unsigned-${{ needs.prepare-candidate.outputs.fork-version }}
+          artifact-ids: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-artifact-id }}
           path: signing-input
+          merge-multiple: true
 
-      - name: Verify input and read committed updater public key as data
+      - name: Download durable unsigned receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-receipt-artifact-id }}
+          path: unsigned-receipt
+          merge-multiple: true
+
+      - name: Verify exact unsigned receipt and signing input
         shell: pwsh
         env:
           CANDIDATE_SHA: ${{ needs.prepare-candidate.outputs.candidate-sha }}
           FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
           GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SOURCE_SHA: ${{ github.sha }}
+          UNSIGNED_ARTIFACT_ID: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-artifact-id }}
+          UNSIGNED_ARTIFACT_ARCHIVE_SHA256: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-artifact-digest }}
+          UNSIGNED_RECEIPT_ARTIFACT_ID: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-receipt-artifact-id }}
+          UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-receipt-artifact-digest }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:GITHUB_REPOSITORY -cne "MakinaX/Handy-Api") {
@@ -530,16 +678,174 @@ jobs:
           }
 
           $expectedName = "Handy.API_$($env:FORK_VERSION)_x64-setup.exe"
+          $expectedArtifactName = "handy-api-windows-x64-unsigned-$($env:FORK_VERSION)"
+          $expectedReceiptFilename = "handy-api-windows-x64-unsigned-receipt.json"
           $inputFiles = @(Get-ChildItem signing-input -Recurse -File)
           if ($inputFiles.Count -ne 1 -or $inputFiles[0].Name -cne $expectedName) {
             throw "Signing input must contain only $expectedName"
           }
+          $installer = $inputFiles[0]
+          if (($installer.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Signing input installer must not be a reparse point"
+          }
+
+          $receiptFiles = @(Get-ChildItem unsigned-receipt -Recurse -File)
+          if ($receiptFiles.Count -ne 1 -or
+              $receiptFiles[0].Name -cne $expectedReceiptFilename) {
+            throw "Unsigned receipt artifact must contain only $expectedReceiptFilename"
+          }
+          $receiptFile = $receiptFiles[0]
+          if (($receiptFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Unsigned receipt must not be a reparse point"
+          }
+          if ($receiptFile.Length -le 0 -or $receiptFile.Length -gt 16384) {
+            throw "Unsigned receipt size is outside the strict evidence bound"
+          }
+          try {
+            $receiptBytes = [IO.File]::ReadAllBytes($receiptFile.FullName)
+            $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+            $receiptText = $strictUtf8.GetString($receiptBytes)
+            $receiptDocument = [Text.Json.JsonDocument]::Parse($receiptText)
+            if ($receiptDocument.RootElement.ValueKind -cne
+                [Text.Json.JsonValueKind]::Object) {
+              throw "Unsigned receipt root must be one JSON object"
+            }
+            $rawReceiptFields = @()
+            $rawReceiptKinds = @{}
+            foreach ($property in $receiptDocument.RootElement.EnumerateObject()) {
+              $rawReceiptFields += $property.Name
+              $rawReceiptKinds[$property.Name] = $property.Value.ValueKind
+            }
+            $receipt = $receiptText | ConvertFrom-Json
+          } catch {
+            throw "Unsigned receipt is not valid JSON"
+          } finally {
+            if ($null -ne $receiptDocument) {
+              $receiptDocument.Dispose()
+            }
+          }
+          $expectedReceiptFields = @(
+            "schema_version",
+            "repository",
+            "github_run_id",
+            "candidate_sha",
+            "fork_version",
+            "unsigned_artifact_name",
+            "unsigned_artifact_id",
+            "unsigned_artifact_archive_sha256",
+            "installer_filename",
+            "installer_size_bytes",
+            "installer_sha256"
+          ) | Sort-Object -CaseSensitive
+          $actualReceiptFields = @($rawReceiptFields) | Sort-Object -CaseSensitive
+          if ($actualReceiptFields.Count -ne $expectedReceiptFields.Count -or
+              [string]::Join("`n", $actualReceiptFields) -cne
+                [string]::Join("`n", $expectedReceiptFields)) {
+            throw "Unsigned receipt schema has missing, extra, or mis-cased fields"
+          }
+          foreach ($stringField in @(
+            "repository",
+            "github_run_id",
+            "candidate_sha",
+            "fork_version",
+            "unsigned_artifact_name",
+            "unsigned_artifact_id",
+            "unsigned_artifact_archive_sha256",
+            "installer_filename",
+            "installer_sha256"
+          )) {
+            if ($rawReceiptKinds[$stringField] -cne
+                [Text.Json.JsonValueKind]::String) {
+              throw "Unsigned receipt field $stringField must be a JSON string"
+            }
+          }
+          if ($rawReceiptKinds["schema_version"] -cne
+                [Text.Json.JsonValueKind]::Number -or
+              $rawReceiptKinds["installer_size_bytes"] -cne
+                [Text.Json.JsonValueKind]::Number) {
+            throw "Unsigned receipt numeric fields must be JSON numbers"
+          }
+          if ($receipt.schema_version.GetType().FullName -notin
+                @("System.Int32", "System.Int64") -or
+              [int64]$receipt.schema_version -ne 1 -or
+              $receipt.repository -cne "MakinaX/Handy-Api" -or
+              $receipt.github_run_id -cne [string]$env:GITHUB_RUN_ID -or
+              $receipt.candidate_sha -cne $env:CANDIDATE_SHA -or
+              $receipt.candidate_sha -notmatch '^[0-9a-f]{40}$' -or
+              $receipt.fork_version -cne $env:FORK_VERSION -or
+              $receipt.unsigned_artifact_name -cne $expectedArtifactName -or
+              $receipt.unsigned_artifact_id -cne $env:UNSIGNED_ARTIFACT_ID -or
+              $receipt.unsigned_artifact_id -notmatch '^[1-9][0-9]*$' -or
+              $receipt.unsigned_artifact_archive_sha256 -cne
+                $env:UNSIGNED_ARTIFACT_ARCHIVE_SHA256 -or
+              $receipt.unsigned_artifact_archive_sha256 -notmatch
+                '^[0-9a-f]{64}$' -or
+              $receipt.installer_filename -cne $expectedName -or
+              $receipt.installer_sha256 -notmatch '^[0-9a-f]{64}$' -or
+              $receipt.installer_size_bytes.GetType().FullName -notin
+                @("System.Int32", "System.Int64") -or
+              [int64]$receipt.installer_size_bytes -le 0) {
+            throw "Unsigned receipt identity or value contract is invalid"
+          }
+          $actualInstallerHash = (Get-FileHash -LiteralPath $installer.FullName `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          $actualInstallerSize = [int64]$installer.Length
+          if ($actualInstallerHash -cne $receipt.installer_sha256 -or
+              $actualInstallerSize -ne [int64]$receipt.installer_size_bytes) {
+            throw "Signing input bytes do not match the durable unsigned receipt"
+          }
+          $unsignedReceiptHash = (Get-FileHash -LiteralPath $receiptFile.FullName `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          Add-Content -Path $env:GITHUB_ENV -Value `
+            "HANDY_API_UNSIGNED_RECEIPT_SHA256=$unsignedReceiptHash"
+          Add-Content -Path $env:GITHUB_ENV -Value `
+            "HANDY_API_RECEIPT_INSTALLER_SHA256=$actualInstallerHash"
+          Add-Content -Path $env:GITHUB_ENV -Value `
+            "HANDY_API_RECEIPT_INSTALLER_SIZE=$actualInstallerSize"
 
           $headers = @{
             Accept = "application/vnd.github+json"
             Authorization = "Bearer $env:GH_TOKEN"
             "X-GitHub-Api-Version" = "2022-11-28"
           }
+          $unsignedArtifactUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:UNSIGNED_ARTIFACT_ID"
+          $unsignedArtifact = Invoke-RestMethod -Uri $unsignedArtifactUri `
+            -Headers $headers
+          $unsignedReceiptArtifactUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:UNSIGNED_RECEIPT_ARTIFACT_ID"
+          $unsignedReceiptArtifact = Invoke-RestMethod `
+            -Uri $unsignedReceiptArtifactUri -Headers $headers
+          if ([string]$unsignedArtifact.id -cne $env:UNSIGNED_ARTIFACT_ID -or
+              $unsignedArtifact.name -cne $expectedArtifactName -or
+              $unsignedArtifact.expired -cne $false -or
+              [string]$unsignedArtifact.workflow_run.id -cne
+                [string]$env:GITHUB_RUN_ID -or
+              $unsignedArtifact.workflow_run.head_sha -cne
+                $env:WORKFLOW_SOURCE_SHA -or
+              $unsignedArtifact.digest -cne
+                "sha256:$($env:UNSIGNED_ARTIFACT_ARCHIVE_SHA256)" -or
+              [int64]$unsignedArtifact.size_in_bytes -le 0) {
+            throw "Unsigned artifact API metadata does not match its durable receipt"
+          }
+          $expectedReceiptArtifactName = `
+            "handy-api-windows-x64-unsigned-receipt-$($env:FORK_VERSION)"
+          if ([string]$unsignedReceiptArtifact.id -cne
+                $env:UNSIGNED_RECEIPT_ARTIFACT_ID -or
+              $unsignedReceiptArtifact.name -cne $expectedReceiptArtifactName -or
+              $unsignedReceiptArtifact.expired -cne $false -or
+              [string]$unsignedReceiptArtifact.workflow_run.id -cne
+                [string]$env:GITHUB_RUN_ID -or
+              $unsignedReceiptArtifact.workflow_run.head_sha -cne
+                $env:WORKFLOW_SOURCE_SHA -or
+              $unsignedReceiptArtifact.digest -cne
+                "sha256:$($env:UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256)" -or
+              [int64]$unsignedReceiptArtifact.size_in_bytes -le 0) {
+            throw "Unsigned receipt artifact API metadata is not exact"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value `
+            "HANDY_API_UNSIGNED_RECEIPT_ARTIFACT_ID=$($env:UNSIGNED_RECEIPT_ARTIFACT_ID)"
+          Add-Content -Path $env:GITHUB_ENV -Value `
+            "HANDY_API_UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256=$($env:UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256)"
+
           $configUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/contents/src-tauri/tauri.conf.json?ref=$env:CANDIDATE_SHA"
           $response = Invoke-RestMethod -Uri $configUri -Headers $headers
           $configBytes = [Convert]::FromBase64String(($response.content -replace '\s', ''))
@@ -599,14 +905,53 @@ jobs:
             throw "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is not configured in handy-api-signing"
           }
           $installer = Join-Path signing-input "Handy.API_$($env:FORK_VERSION)_x64-setup.exe"
+          $preSignFiles = @(Get-ChildItem signing-input -Recurse -File)
+          if ($preSignFiles.Count -ne 1 -or
+              $preSignFiles[0].Name -cne
+                "Handy.API_$($env:FORK_VERSION)_x64-setup.exe") {
+            throw "Pre-sign input must still contain only the exact installer"
+          }
+          $preSignHash = (Get-FileHash -LiteralPath $installer `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          $preSignSize = [int64](Get-Item -LiteralPath $installer).Length
+          if ($preSignHash -cne $env:HANDY_API_RECEIPT_INSTALLER_SHA256 -or
+              $preSignSize -ne [int64]$env:HANDY_API_RECEIPT_INSTALLER_SIZE) {
+            throw "Pre-sign installer bytes differ from the durable unsigned receipt"
+          }
           & $env:TAURI_SIGNER_EXE signer sign $installer
           if ($LASTEXITCODE -ne 0) {
             throw "Pinned Tauri updater signing failed"
           }
+          $postSignHash = (Get-FileHash -LiteralPath $installer `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          $postSignSize = [int64](Get-Item -LiteralPath $installer).Length
+          if ($postSignHash -cne $preSignHash -or
+              $postSignSize -ne $preSignSize) {
+            throw "Tauri signer changed installer bytes"
+          }
+          $signaturePath = "${installer}.sig"
+          $postSignFiles = @(Get-ChildItem signing-input -Recurse -File)
+          if ($postSignFiles.Count -ne 2 -or
+              -not (Test-Path $signaturePath -PathType Leaf) -or
+              (Get-Item -LiteralPath $signaturePath).Length -le 0) {
+            throw "Tauri signer must add only the exact non-empty .sig file"
+          }
+          $measurements = [ordered]@{
+            pre_sign_installer_sha256 = $preSignHash
+            post_sign_installer_sha256 = $postSignHash
+            pre_sign_installer_size_bytes = $preSignSize
+            post_sign_installer_size_bytes = $postSignSize
+          }
+          $measurementsPath = Join-Path $env:RUNNER_TEMP `
+            "handy-api-signing-measurements.json"
+          $measurements | ConvertTo-Json -Depth 3 | Set-Content `
+            -LiteralPath $measurementsPath -Encoding utf8NoBOM
 
-      - name: Verify exact signature with committed public key
+      - name: Verify byte invariance and exact signature with committed public key
+        id: verify-signed
         shell: pwsh
         env:
+          CANDIDATE_SHA: ${{ needs.prepare-candidate.outputs.candidate-sha }}
           FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -626,6 +971,29 @@ jobs:
           )
           if ($foreignInstallers.Count -ne 0) {
             throw "Foreign signed installer found: $($foreignInstallers.Name -join ', ')"
+          }
+          $measurementsPath = Join-Path $env:RUNNER_TEMP `
+            "handy-api-signing-measurements.json"
+          if (-not (Test-Path $measurementsPath -PathType Leaf)) {
+            throw "Signing byte measurements are missing"
+          }
+          $measurements = Get-Content -LiteralPath $measurementsPath -Raw |
+            ConvertFrom-Json
+          $currentInstallerHash = (Get-FileHash -LiteralPath $installer `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          $currentInstallerSize = [int64](Get-Item -LiteralPath $installer).Length
+          if ($measurements.pre_sign_installer_sha256 -cne
+                $env:HANDY_API_RECEIPT_INSTALLER_SHA256 -or
+              $measurements.post_sign_installer_sha256 -cne
+                $measurements.pre_sign_installer_sha256 -or
+              $currentInstallerHash -cne $measurements.post_sign_installer_sha256 -or
+              [int64]$measurements.pre_sign_installer_size_bytes -ne
+                [int64]$env:HANDY_API_RECEIPT_INSTALLER_SIZE -or
+              [int64]$measurements.post_sign_installer_size_bytes -ne
+                [int64]$measurements.pre_sign_installer_size_bytes -or
+              $currentInstallerSize -ne
+                [int64]$measurements.post_sign_installer_size_bytes) {
+            throw "Installer byte invariance evidence does not match the unsigned receipt"
           }
 
           $verifierUrl = "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip"
@@ -666,11 +1034,27 @@ jobs:
           }
 
           New-Item -ItemType Directory -Path signed-assets -Force | Out-Null
-          Copy-Item $installer signed-assets/
-          Copy-Item $signaturePath signed-assets/
-          Get-FileHash $installer, $signaturePath -Algorithm SHA256 | Format-List
+          Copy-Item -LiteralPath $installer -Destination signed-assets/
+          Copy-Item -LiteralPath $signaturePath -Destination signed-assets/
+          $signatureHash = (Get-FileHash -LiteralPath $signaturePath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          Add-Content -Path $env:GITHUB_OUTPUT -Value `
+            "installer-filename=$expectedName"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value `
+            "installer-size-bytes=$currentInstallerSize"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value `
+            "pre-sign-installer-sha256=$($measurements.pre_sign_installer_sha256)"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value `
+            "post-sign-installer-sha256=$($measurements.post_sign_installer_sha256)"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value `
+            "signature-filename=$expectedName.sig"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value `
+            "signature-sha256=$signatureHash"
+          Get-FileHash -LiteralPath $installer, $signaturePath -Algorithm SHA256 |
+            Format-List
 
       - name: Upload exact signed acceptance artifact
+        id: upload-signed
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: handy-api-windows-x64-signed-${{ needs.prepare-candidate.outputs.fork-version }}
@@ -680,11 +1064,266 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Create durable signing receipt
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ needs.prepare-candidate.outputs.candidate-sha }}
+          FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
+          INSTALLER_FILENAME: ${{ steps.verify-signed.outputs.installer-filename }}
+          INSTALLER_SIZE_BYTES: ${{ steps.verify-signed.outputs.installer-size-bytes }}
+          PRE_SIGN_INSTALLER_SHA256: ${{ steps.verify-signed.outputs.pre-sign-installer-sha256 }}
+          POST_SIGN_INSTALLER_SHA256: ${{ steps.verify-signed.outputs.post-sign-installer-sha256 }}
+          SIGNATURE_FILENAME: ${{ steps.verify-signed.outputs.signature-filename }}
+          SIGNATURE_SHA256: ${{ steps.verify-signed.outputs.signature-sha256 }}
+          SIGNED_ARTIFACT_NAME: handy-api-windows-x64-signed-${{ needs.prepare-candidate.outputs.fork-version }}
+          SIGNED_ARTIFACT_ID: ${{ steps.upload-signed.outputs.artifact-id }}
+          SIGNED_ARTIFACT_ARCHIVE_SHA256: ${{ steps.upload-signed.outputs.artifact-digest }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedName = "Handy.API_$($env:FORK_VERSION)_x64-setup.exe"
+          $expectedSignatureName = "$expectedName.sig"
+          $expectedSignedArtifactName = `
+            "handy-api-windows-x64-signed-$($env:FORK_VERSION)"
+          if ($env:GITHUB_REPOSITORY -cne "MakinaX/Handy-Api" -or
+              $env:GITHUB_RUN_ID -notmatch '^[1-9][0-9]*$' -or
+              $env:CANDIDATE_SHA -notmatch '^[0-9a-f]{40}$' -or
+              $env:FORK_VERSION -notmatch
+                '^[0-9]+\.[0-9]+\.[0-9]+-api\.[0-9]+$' -or
+              $env:INSTALLER_FILENAME -cne $expectedName -or
+              $env:INSTALLER_SIZE_BYTES -notmatch '^[1-9][0-9]*$' -or
+              $env:PRE_SIGN_INSTALLER_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+              $env:POST_SIGN_INSTALLER_SHA256 -cne
+                $env:PRE_SIGN_INSTALLER_SHA256 -or
+              $env:SIGNATURE_FILENAME -cne $expectedSignatureName -or
+              $env:SIGNATURE_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+              $env:SIGNED_ARTIFACT_NAME -cne $expectedSignedArtifactName -or
+              $env:SIGNED_ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or
+              $env:SIGNED_ARTIFACT_ARCHIVE_SHA256 -notmatch
+                '^[0-9a-f]{64}$' -or
+              $env:HANDY_API_UNSIGNED_RECEIPT_ARTIFACT_ID -notmatch
+                '^[1-9][0-9]*$' -or
+              $env:HANDY_API_UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256 -notmatch
+                '^[0-9a-f]{64}$' -or
+              $env:HANDY_API_UNSIGNED_RECEIPT_SHA256 -notmatch
+                '^[0-9a-f]{64}$') {
+            throw "Signing receipt inputs are invalid"
+          }
+
+          $signedFiles = @(Get-ChildItem signed-assets -Recurse -File)
+          if ($signedFiles.Count -ne 2) {
+            throw "Signed acceptance artifact must contain exactly two files"
+          }
+          $installer = Join-Path signed-assets $expectedName
+          $signaturePath = Join-Path signed-assets $expectedSignatureName
+          if (-not (Test-Path $installer -PathType Leaf) -or
+              -not (Test-Path $signaturePath -PathType Leaf) -or
+              (Get-Item -LiteralPath $signaturePath).Length -le 0) {
+            throw "Signed acceptance files are incomplete"
+          }
+          foreach ($signedFile in $signedFiles) {
+            if (($signedFile.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "Signed acceptance files must not be reparse points"
+            }
+          }
+          $installerHash = (Get-FileHash -LiteralPath $installer `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          $installerSize = [int64](Get-Item -LiteralPath $installer).Length
+          $signatureHash = (Get-FileHash -LiteralPath $signaturePath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($installerHash -cne $env:PRE_SIGN_INSTALLER_SHA256 -or
+              $installerHash -cne $env:POST_SIGN_INSTALLER_SHA256 -or
+              $installerSize -ne [int64]$env:INSTALLER_SIZE_BYTES -or
+              $signatureHash -cne $env:SIGNATURE_SHA256) {
+            throw "Uploaded signed artifact source differs from verified evidence"
+          }
+
+          $unsignedReceiptPath = Join-Path unsigned-receipt `
+            "handy-api-windows-x64-unsigned-receipt.json"
+          if (-not (Test-Path $unsignedReceiptPath -PathType Leaf)) {
+            throw "Verified unsigned receipt is missing"
+          }
+          $unsignedReceiptHash = (Get-FileHash `
+            -LiteralPath $unsignedReceiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($unsignedReceiptHash -cne $env:HANDY_API_UNSIGNED_RECEIPT_SHA256) {
+            throw "Unsigned receipt changed after pre-sign verification"
+          }
+
+          $signingReceiptDirectory = "signing-receipt"
+          $signingReceiptFilename = `
+            "handy-api-windows-x64-signing-receipt.json"
+          New-Item -ItemType Directory -Path $signingReceiptDirectory -Force |
+            Out-Null
+          $signingReceiptPath = Join-Path $signingReceiptDirectory `
+            $signingReceiptFilename
+          $signingReceipt = [ordered]@{
+            schema_version = 1
+            repository = $env:GITHUB_REPOSITORY
+            github_run_id = [string]$env:GITHUB_RUN_ID
+            candidate_sha = $env:CANDIDATE_SHA
+            fork_version = $env:FORK_VERSION
+            installer_filename = $expectedName
+            signed_artifact_name = $expectedSignedArtifactName
+            signed_artifact_id = $env:SIGNED_ARTIFACT_ID
+            signed_artifact_archive_sha256 = `
+              $env:SIGNED_ARTIFACT_ARCHIVE_SHA256
+            unsigned_receipt_artifact_name = `
+              "handy-api-windows-x64-unsigned-receipt-$($env:FORK_VERSION)"
+            unsigned_receipt_artifact_id = `
+              $env:HANDY_API_UNSIGNED_RECEIPT_ARTIFACT_ID
+            unsigned_receipt_artifact_archive_sha256 = `
+              $env:HANDY_API_UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256
+            unsigned_receipt_filename = `
+              "handy-api-windows-x64-unsigned-receipt.json"
+            unsigned_receipt_sha256 = $unsignedReceiptHash
+            pre_sign_installer_sha256 = $installerHash
+            post_sign_installer_sha256 = $installerHash
+            installer_size_bytes = $installerSize
+            signature_filename = $expectedSignatureName
+            signature_sha256 = $signatureHash
+            byte_invariance = $true
+            cryptographic_signature_verified = $true
+          }
+          $signingReceipt | ConvertTo-Json -Depth 3 | Set-Content `
+            -LiteralPath $signingReceiptPath -Encoding utf8NoBOM
+
+          $signingReceiptFiles = @(
+            Get-ChildItem $signingReceiptDirectory -Recurse -File
+          )
+          if ($signingReceiptFiles.Count -ne 1 -or
+              $signingReceiptFiles[0].Name -cne $signingReceiptFilename -or
+              $signingReceiptFiles[0].Length -le 0 -or
+              $signingReceiptFiles[0].Length -gt 16384) {
+            throw "Signing receipt artifact must contain only the bounded receipt"
+          }
+          $receiptText = Get-Content -LiteralPath $signingReceiptPath -Raw
+          $receiptDocument = $null
+          try {
+            $receiptDocument = [Text.Json.JsonDocument]::Parse($receiptText)
+            if ($receiptDocument.RootElement.ValueKind -cne
+                [Text.Json.JsonValueKind]::Object) {
+              throw "Signing receipt root must be one JSON object"
+            }
+            $rawFields = @()
+            $rawKinds = @{}
+            foreach ($property in $receiptDocument.RootElement.EnumerateObject()) {
+              $rawFields += $property.Name
+              $rawKinds[$property.Name] = $property.Value.ValueKind
+            }
+            $signingReceiptReadback = $receiptText | ConvertFrom-Json
+          } catch {
+            throw "Signing receipt is not valid JSON"
+          } finally {
+            if ($null -ne $receiptDocument) {
+              $receiptDocument.Dispose()
+            }
+          }
+          $expectedFields = @(
+            "schema_version",
+            "repository",
+            "github_run_id",
+            "candidate_sha",
+            "fork_version",
+            "installer_filename",
+            "signed_artifact_name",
+            "signed_artifact_id",
+            "signed_artifact_archive_sha256",
+            "unsigned_receipt_artifact_name",
+            "unsigned_receipt_artifact_id",
+            "unsigned_receipt_artifact_archive_sha256",
+            "unsigned_receipt_filename",
+            "unsigned_receipt_sha256",
+            "pre_sign_installer_sha256",
+            "post_sign_installer_sha256",
+            "installer_size_bytes",
+            "signature_filename",
+            "signature_sha256",
+            "byte_invariance",
+            "cryptographic_signature_verified"
+          ) | Sort-Object -CaseSensitive
+          $actualFields = @($rawFields) | Sort-Object -CaseSensitive
+          if ($actualFields.Count -ne $expectedFields.Count -or
+              [string]::Join("`n", $actualFields) -cne
+                [string]::Join("`n", $expectedFields)) {
+            throw "Signing receipt schema has missing, extra, or mis-cased fields"
+          }
+          foreach ($stringField in @(
+            "repository", "github_run_id", "candidate_sha", "fork_version",
+            "installer_filename", "signed_artifact_name", "signed_artifact_id",
+            "signed_artifact_archive_sha256", "unsigned_receipt_artifact_name",
+            "unsigned_receipt_artifact_id",
+            "unsigned_receipt_artifact_archive_sha256",
+            "unsigned_receipt_filename", "unsigned_receipt_sha256",
+            "pre_sign_installer_sha256", "post_sign_installer_sha256",
+            "signature_filename", "signature_sha256"
+          )) {
+            if ($rawKinds[$stringField] -cne [Text.Json.JsonValueKind]::String) {
+              throw "Signing receipt field $stringField must be a JSON string"
+            }
+          }
+          if ($rawKinds["schema_version"] -cne
+                [Text.Json.JsonValueKind]::Number -or
+              $rawKinds["installer_size_bytes"] -cne
+                [Text.Json.JsonValueKind]::Number -or
+              $rawKinds["byte_invariance"] -cne
+                [Text.Json.JsonValueKind]::True -or
+              $rawKinds["cryptographic_signature_verified"] -cne
+                [Text.Json.JsonValueKind]::True) {
+            throw "Signing receipt typed fields are invalid"
+          }
+          if ($signingReceiptReadback.schema_version.GetType().FullName -notin
+                @("System.Int32", "System.Int64") -or
+              [int64]$signingReceiptReadback.schema_version -ne 1 -or
+              $signingReceiptReadback.repository -cne $env:GITHUB_REPOSITORY -or
+              $signingReceiptReadback.github_run_id -cne
+                [string]$env:GITHUB_RUN_ID -or
+              $signingReceiptReadback.candidate_sha -cne $env:CANDIDATE_SHA -or
+              $signingReceiptReadback.fork_version -cne $env:FORK_VERSION -or
+              $signingReceiptReadback.installer_filename -cne $expectedName -or
+              $signingReceiptReadback.signed_artifact_name -cne
+                $expectedSignedArtifactName -or
+              $signingReceiptReadback.signed_artifact_id -cne
+                $env:SIGNED_ARTIFACT_ID -or
+              $signingReceiptReadback.signed_artifact_archive_sha256 -cne
+                $env:SIGNED_ARTIFACT_ARCHIVE_SHA256 -or
+              $signingReceiptReadback.unsigned_receipt_artifact_id -cne
+                $env:HANDY_API_UNSIGNED_RECEIPT_ARTIFACT_ID -or
+              $signingReceiptReadback.unsigned_receipt_artifact_archive_sha256 -cne
+                $env:HANDY_API_UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256 -or
+              $signingReceiptReadback.unsigned_receipt_sha256 -cne
+                $unsignedReceiptHash -or
+              $signingReceiptReadback.pre_sign_installer_sha256 -cne
+                $installerHash -or
+              $signingReceiptReadback.post_sign_installer_sha256 -cne
+                $installerHash -or
+              [int64]$signingReceiptReadback.installer_size_bytes -ne
+                $installerSize -or
+              $signingReceiptReadback.signature_filename -cne
+                $expectedSignatureName -or
+              $signingReceiptReadback.signature_sha256 -cne $signatureHash -or
+              $signingReceiptReadback.byte_invariance -cne $true -or
+              $signingReceiptReadback.cryptographic_signature_verified -cne
+                $true) {
+            throw "Signing receipt read-back does not match verified evidence"
+          }
+          Get-FileHash -LiteralPath $installer, $signaturePath, `
+            $signingReceiptPath -Algorithm SHA256 | Format-List
+
+      - name: Upload durable signing receipt
+        id: upload-signing-receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: handy-api-windows-x64-signing-receipt-${{ needs.prepare-candidate.outputs.fork-version }}
+          path: signing-receipt/handy-api-windows-x64-signing-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+
   publish-release:
     needs:
       - prepare-candidate
       - candidate-gates
       - release-contract
+      - build-unsigned-windows-x64
       - sign-windows-updater
     if: needs.prepare-candidate.outputs.update-required == 'true'
     runs-on: ubuntu-24.04
@@ -707,13 +1346,35 @@ jobs:
       - name: Download verified release inputs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: handy-api-windows-x64-signed-${{ needs.prepare-candidate.outputs.fork-version }}
+          artifact-ids: ${{ needs.sign-windows-updater.outputs.signed-artifact-id }}
           path: release-assets
+          merge-multiple: true
+
+      - name: Download unsigned release receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-receipt-artifact-id }}
+          path: unsigned-receipt
+          merge-multiple: true
+
+      - name: Download signing release receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.sign-windows-updater.outputs.signing-receipt-artifact-id }}
+          path: signing-receipt
+          merge-multiple: true
 
       - name: Build and verify updater manifest
         env:
+          CANDIDATE_SHA: ${{ needs.prepare-candidate.outputs.candidate-sha }}
           FORK_VERSION: ${{ needs.prepare-candidate.outputs.fork-version }}
           RELEASE_TAG: ${{ needs.prepare-candidate.outputs.release-tag }}
+          UNSIGNED_ARTIFACT_ID: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-artifact-id }}
+          UNSIGNED_ARTIFACT_ARCHIVE_SHA256: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-artifact-digest }}
+          UNSIGNED_RECEIPT_ARTIFACT_ID: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-receipt-artifact-id }}
+          UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256: ${{ needs.build-unsigned-windows-x64.outputs.unsigned-receipt-artifact-digest }}
+          SIGNED_ARTIFACT_ID: ${{ needs.sign-windows-updater.outputs.signed-artifact-id }}
+          SIGNED_ARTIFACT_ARCHIVE_SHA256: ${{ needs.sign-windows-updater.outputs.signed-artifact-digest }}
         shell: bash
         run: |
           set -euo pipefail
@@ -740,6 +1401,104 @@ jobs:
             echo "Signed release input must contain exactly installer and signature" >&2
             exit 1
           fi
+
+          unsigned_receipt="unsigned-receipt/handy-api-windows-x64-unsigned-receipt.json"
+          signing_receipt="signing-receipt/handy-api-windows-x64-signing-receipt.json"
+          [[ -f "$unsigned_receipt" && -f "$signing_receipt" ]]
+          [[ "$(find unsigned-receipt -type f | wc -l)" -eq 1 ]]
+          [[ "$(find signing-receipt -type f | wc -l)" -eq 1 ]]
+          unsigned_receipt_sha="$(sha256sum "$unsigned_receipt" | awk '{print $1}')"
+          installer_sha="$(sha256sum "$installer" | awk '{print $1}')"
+          installer_size="$(stat --format='%s' "$installer")"
+          signature_sha="$(sha256sum "$signature_file" | awk '{print $1}')"
+          unsigned_artifact_name="handy-api-windows-x64-unsigned-${FORK_VERSION}"
+          unsigned_receipt_artifact_name="handy-api-windows-x64-unsigned-receipt-${FORK_VERSION}"
+          signed_artifact_name="handy-api-windows-x64-signed-${FORK_VERSION}"
+          [[ "$UNSIGNED_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$UNSIGNED_ARTIFACT_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$UNSIGNED_RECEIPT_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$SIGNED_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SIGNED_ARTIFACT_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+
+          jq -e --arg repository "$GITHUB_REPOSITORY" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg candidate_sha "$CANDIDATE_SHA" \
+            --arg version "$FORK_VERSION" \
+            --arg artifact "$unsigned_artifact_name" \
+            --arg artifact_id "$UNSIGNED_ARTIFACT_ID" \
+            --arg artifact_digest "$UNSIGNED_ARTIFACT_ARCHIVE_SHA256" \
+            --arg filename "$expected_name" \
+            --arg sha "$installer_sha" \
+            --argjson size "$installer_size" '
+              (keys == [
+                "candidate_sha", "fork_version", "github_run_id",
+                "installer_filename", "installer_sha256",
+                "installer_size_bytes", "repository", "schema_version",
+                "unsigned_artifact_archive_sha256", "unsigned_artifact_id",
+                "unsigned_artifact_name"
+              ]) and
+              .schema_version == 1 and .repository == $repository and
+              .github_run_id == $run_id and .candidate_sha == $candidate_sha and
+              .fork_version == $version and
+              .unsigned_artifact_name == $artifact and
+              .unsigned_artifact_id == $artifact_id and
+              .unsigned_artifact_archive_sha256 == $artifact_digest and
+              .installer_filename == $filename and
+              .installer_size_bytes == $size and .installer_sha256 == $sha
+            ' "$unsigned_receipt" >/dev/null
+
+          jq -e --arg repository "$GITHUB_REPOSITORY" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg candidate_sha "$CANDIDATE_SHA" \
+            --arg version "$FORK_VERSION" \
+            --arg filename "$expected_name" \
+            --arg signed_artifact "$signed_artifact_name" \
+            --arg signed_artifact_id "$SIGNED_ARTIFACT_ID" \
+            --arg signed_artifact_digest "$SIGNED_ARTIFACT_ARCHIVE_SHA256" \
+            --arg receipt_artifact "$unsigned_receipt_artifact_name" \
+            --arg receipt_artifact_id "$UNSIGNED_RECEIPT_ARTIFACT_ID" \
+            --arg receipt_artifact_digest "$UNSIGNED_RECEIPT_ARTIFACT_ARCHIVE_SHA256" \
+            --arg receipt_sha "$unsigned_receipt_sha" \
+            --arg installer_sha "$installer_sha" \
+            --arg signature_filename "${expected_name}.sig" \
+            --arg signature_sha "$signature_sha" \
+            --argjson size "$installer_size" '
+              (keys == [
+                "byte_invariance", "candidate_sha",
+                "cryptographic_signature_verified", "fork_version",
+                "github_run_id", "installer_filename",
+                "installer_size_bytes", "post_sign_installer_sha256",
+                "pre_sign_installer_sha256", "repository", "schema_version",
+                "signed_artifact_archive_sha256", "signed_artifact_id",
+                "signed_artifact_name",
+                "signature_filename", "signature_sha256",
+                "unsigned_receipt_artifact_archive_sha256",
+                "unsigned_receipt_artifact_id",
+                "unsigned_receipt_artifact_name",
+                "unsigned_receipt_filename", "unsigned_receipt_sha256"
+              ]) and
+              .schema_version == 1 and .repository == $repository and
+              .github_run_id == $run_id and .candidate_sha == $candidate_sha and
+              .fork_version == $version and .installer_filename == $filename and
+              .signed_artifact_name == $signed_artifact and
+              .signed_artifact_id == $signed_artifact_id and
+              .signed_artifact_archive_sha256 == $signed_artifact_digest and
+              .unsigned_receipt_artifact_name == $receipt_artifact and
+              .unsigned_receipt_artifact_id == $receipt_artifact_id and
+              .unsigned_receipt_artifact_archive_sha256 ==
+                $receipt_artifact_digest and
+              .unsigned_receipt_filename ==
+                "handy-api-windows-x64-unsigned-receipt.json" and
+              .unsigned_receipt_sha256 == $receipt_sha and
+              .pre_sign_installer_sha256 == $installer_sha and
+              .post_sign_installer_sha256 == $installer_sha and
+              .installer_size_bytes == $size and
+              .signature_filename == $signature_filename and
+              .signature_sha256 == $signature_sha and
+              .byte_invariance == true and
+              .cryptographic_signature_verified == true
+            ' "$signing_receipt" >/dev/null
 
           signature="$(tr -d '\r\n' <"$signature_file")"
           if [[ -z "$signature" ]]; then
