@@ -83,6 +83,10 @@ struct CaptureEvidenceAccumulator {
     fallback_vad_voiced_frames: usize,
     fallback_vad_consecutive_speech_frames: usize,
     fallback_vad_confirmed_onsets: usize,
+    fallback_vad_longest_voiced_run_frames: usize,
+    fallback_vad_latest_confirmed_run_frames: usize,
+    fallback_vad_last_voiced_frame: Option<usize>,
+    fallback_vad_last_confirmed_speech_frame: Option<usize>,
     vad_error_frames: usize,
 }
 
@@ -100,6 +104,10 @@ impl CaptureEvidenceAccumulator {
             fallback_vad_voiced_frames: 0,
             fallback_vad_consecutive_speech_frames: 0,
             fallback_vad_confirmed_onsets: 0,
+            fallback_vad_longest_voiced_run_frames: 0,
+            fallback_vad_latest_confirmed_run_frames: 0,
+            fallback_vad_last_voiced_frame: None,
+            fallback_vad_last_confirmed_speech_frame: None,
             vad_error_frames: 0,
         }
     }
@@ -136,7 +144,16 @@ impl CaptureEvidenceAccumulator {
             self.fallback_vad_consecutive_speech_frames = self
                 .fallback_vad_consecutive_speech_frames
                 .saturating_add(1);
-            if self.fallback_vad_consecutive_speech_frames == 2 {
+            self.fallback_vad_longest_voiced_run_frames = self
+                .fallback_vad_longest_voiced_run_frames
+                .max(self.fallback_vad_consecutive_speech_frames);
+            self.fallback_vad_last_voiced_frame = Some(self.vad_successful_frames);
+            if self.fallback_vad_consecutive_speech_frames >= vad::VAD_ONSET_FRAMES {
+                self.fallback_vad_latest_confirmed_run_frames =
+                    self.fallback_vad_consecutive_speech_frames;
+                self.fallback_vad_last_confirmed_speech_frame = Some(self.vad_successful_frames);
+            }
+            if self.fallback_vad_consecutive_speech_frames == vad::VAD_ONSET_FRAMES {
                 self.fallback_vad_confirmed_onsets =
                     self.fallback_vad_confirmed_onsets.saturating_add(1);
             }
@@ -165,19 +182,17 @@ impl CaptureEvidenceAccumulator {
         } else {
             (self.sum_squares / self.finite_sample_count as f64).sqrt() as f32
         };
-        let (vad_analyzed_frames, vad_voiced_frames, vad_confirmed_speech_onsets) = activity
-            .map(|report| {
-                (
-                    report.analyzed_frames,
-                    report.voiced_frames,
-                    report.confirmed_speech_onsets,
-                )
-            })
-            .unwrap_or((
-                self.vad_successful_frames,
-                self.fallback_vad_voiced_frames,
-                self.fallback_vad_confirmed_onsets,
-            ));
+        let activity = activity.unwrap_or(VadActivityReport {
+            analyzed_frames: self.vad_successful_frames,
+            voiced_frames: self.fallback_vad_voiced_frames,
+            confirmed_speech_onsets: self.fallback_vad_confirmed_onsets,
+            onset_frames: vad::VAD_ONSET_FRAMES,
+            longest_voiced_run_frames: self.fallback_vad_longest_voiced_run_frames,
+            latest_confirmed_run_frames: self.fallback_vad_latest_confirmed_run_frames,
+            last_voiced_frame: self.fallback_vad_last_voiced_frame,
+            last_confirmed_speech_frame: self.fallback_vad_last_confirmed_speech_frame,
+            ..VadActivityReport::default()
+        });
 
         CaptureEvidence {
             raw_sample_count: self.raw_sample_count,
@@ -188,9 +203,19 @@ impl CaptureEvidenceAccumulator {
             exact_zero_samples: self.exact_zero_samples,
             non_finite_samples: self.non_finite_samples,
             output_sample_count,
-            vad_analyzed_frames,
-            vad_voiced_frames,
-            vad_confirmed_speech_onsets,
+            vad_analyzed_frames: activity.analyzed_frames,
+            vad_voiced_frames: activity.voiced_frames,
+            vad_confirmed_speech_onsets: activity.confirmed_speech_onsets,
+            vad_onset_frames: activity.onset_frames,
+            vad_longest_voiced_run_frames: activity.longest_voiced_run_frames,
+            vad_latest_confirmed_run_frames: activity.latest_confirmed_run_frames,
+            vad_last_voiced_frame: activity.last_voiced_frame,
+            vad_last_confirmed_speech_frame: activity.last_confirmed_speech_frame,
+            vad_hangover_frames: activity.hangover_frames,
+            vad_probability_frames: activity.probability_frames,
+            vad_mean_probability: activity.mean_voice_probability,
+            vad_max_probability: activity.max_voice_probability,
+            vad_probability_threshold: activity.voice_probability_threshold,
             vad_error_frames: self.vad_error_frames,
         }
     }
@@ -999,6 +1024,12 @@ mod tests {
         assert_eq!(evidence.vad_analyzed_frames, 2);
         assert_eq!(evidence.vad_voiced_frames, 2);
         assert_eq!(evidence.vad_confirmed_speech_onsets, 1);
+        assert_eq!(evidence.vad_onset_frames, 2);
+        assert_eq!(evidence.vad_longest_voiced_run_frames, 2);
+        assert_eq!(evidence.vad_latest_confirmed_run_frames, 2);
+        assert_eq!(evidence.vad_last_voiced_frame, Some(2));
+        assert_eq!(evidence.vad_last_confirmed_speech_frame, Some(2));
+        assert_eq!(evidence.vad_hangover_frames, 2);
         assert_eq!(evidence.vad_error_frames, 0);
     }
 

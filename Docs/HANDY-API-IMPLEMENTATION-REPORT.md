@@ -1,25 +1,35 @@
 # Handy API implementation report
 
-Date: 2026-08-31 KST
+Date: 2026-09-04 KST
 
-Current branch: `codex/handy-api-v0.9.6`
+Current branch: `codex/stt-physical-hallucination-guard`
 
 Baseline tag/commit: `v0.9.6` / `af48dd68a64d58aad128fdbb920492a03da53c79`
 
 ## Verdict
 
-The local implementation and release scaffolding are substantially complete,
-but this checkout does **not** yet satisfy the brief's final completion
-standard. Receipt-hardened run `33354201384` built and runtime-smoked an
-unsigned Windows NSIS installer, emitted its durable receipt, and passed the
-Director's independent byte read-back. After one signing-only approval, the
-signing input gate, Tauri signature command, and installer byte-invariance gate
-passed. The following step failed closed before cryptographic verification
-because it assumed the pinned multi-architecture Minisign archive contained one
-recursive executable. No signed artifact or signing receipt was uploaded, and
-production did not run. Live Gemini, physical microphone, cursor-paste,
-Credential Manager, installer-isolation, and updater acceptance remain
-**NOT EXECUTED** on physical Windows.
+Release and production are **BLOCKED**. Physical Windows acceptance failed on
+Local Whisper Large V3 through the real F1 microphone path: long no-speech
+captures and long silence followed by short Korean speech produced fabricated
+cursor output, while some real short utterances were omitted. The failed
+candidate is commit `85ce706aaf998591ac9e9fc7a7e158b252121fa4` from run
+`33371021364`. That run has already produced a signed artifact and signing
+receipt, but its protected `handy-api-production` job is still waiting and must
+not be approved. The signed candidate is disqualified from tag, release, and
+`latest.json` promotion.
+
+Authenticated artifact read-back identifies signed artifact `9934800266`
+(`sha256:443b83aa5d5e8132e9811d58f1eef44937c950afa86276c496d8e4f24f5b6408`)
+and signing-receipt artifact `9934800918`
+(`sha256:d592cf3382e4e2bf9b0b385316962b22e4271f0ff909823a125a12903b083f8b`).
+These identify the failed candidate only; they are not approval evidence.
+
+The failed binary logged aggregate VAD counts only at debug level; it did not
+emit the complete per-capture metrics now required. Consequently the physical
+failure's RMS, peak, VAD run/density/tail details, and exact pre/post verdicts
+are **NOT CAPTURED**. The Director-provided observable evidence is limited to
+the F1 conditions, pasted hallucination examples, and short-speech omissions;
+numeric values must not be inferred after the fact.
 
 The product and repository identity is now `Handy API` / `MakinaX/Handy-Api`.
 The Director reports that GitHub authentication and a dedicated updater
@@ -28,10 +38,10 @@ now bound to the fork and the strict release contract passes. The private key
 and password were not read by this checkout or printed. The environment-level
 secrets and both protected approval environments are configured. Earlier
 old-source runs were cancelled safely, as recorded in
-`Docs/HANDY-API-SIGNING-ROOTFIX-RECEIPT.json`; the current failed signing run is
+`Docs/HANDY-API-SIGNING-ROOTFIX-RECEIPT.json`; the earlier failed signing run is
 recorded separately in `Docs/HANDY-API-MINISIGN-ROOTFIX-RECEIPT.json`. A new
-commit and wholly new run must repeat unsigned evidence read-back and receive a
-new exact-run signing approval. The exact procedure is in
+unsigned diagnostic candidate must pass the physical hallucination corpus
+before any new signing run or approval is considered. The exact procedure is in
 `Docs/HANDY-API-ONE-TIME-SETUP.md`.
 
 ## Fresh baseline and adopted upstream work
@@ -65,16 +75,34 @@ new exact-run signing approval. The exact procedure is in
 ### Speech-presence and hallucination guard
 
 - Capture evidence records raw sample count/duration, output sample count,
-  peak, RMS, exact-zero/non-finite state, VAD analyzed/voiced/error frames, and
-  confirmed two-frame speech onsets.
+  peak, RMS, exact-zero/non-finite state, VAD analyzed/voiced/error frames,
+  confirmed onsets, longest/latest confirmed raw-positive runs, last
+  voice/confirmed positions, active onset/hangover settings, and aggregate
+  Silero probabilities plus its threshold.
 - Stage A/B rejects strong no-speech before Local inference, Gemini request,
   WAV/history persistence, or paste.
 - Live provider callbacks are held behind a bounded one-second pre-roll latch
   until the same confirmed Silero onset. Missing/erroring VAD never opens that
   streaming latch.
-- Stage C rejects borderline/no-onset transcripts without affirmative provider
-  speech evidence. Lexical patterns are only a secondary signal; real speech
-  with a confirmed onset is not rejected merely for containing a stock phrase.
+- A single confirmed onset is no longer permanent proof for the whole capture.
+  The existing two-frame onset remains affirmative in the configured tail
+  window so a delayed short utterance does not acquire an uncalibrated
+  three-frame threshold. Once stale, an onset requires both a run beyond the
+  bare onset and whole-capture density derived from the existing
+  onset/hangover contract; a lone old two-frame onset becomes Borderline.
+- Stage C recomputes the same durable-capture condition and rejects Local
+  Borderline output because Local currently supplies no positive post-STT
+  metadata. The physical failure phrases were not added to the lexical pattern
+  set. VAD threshold `0.3` and the two-frame detector onset remain unchanged
+  pending physical calibration.
+- `transcribe-cpp` 0.2's safe transcript exposes family-specific per-token
+  probability hints but no calibrated Whisper no-speech probability. Those
+  hints are not promoted to `PostSttEvidence` until physical paired samples can
+  show that an aggregate separates real short speech from hallucination.
+- Release logs emit one privacy-safe `speech_guard_capture` line and one
+  `speech_guard_final` line per normally stopped operation. Transcript logging
+  is limited to empty/single-token/multi-token class plus character and word
+  counts.
 - The same guard is used for Local and Gemini paths.
 
 ### ESC hard cancellation
@@ -358,8 +386,9 @@ digest, inner EXE size, and SHA, then make a new run-specific signing decision.
   `minisign 0.12`, then re-hashes and freshly expands the archive before
   post-signature invocation. A fresh commit and full run are required; the
   failed run must not be rerun.
-- Windows acceptance remains **NOT EXECUTED**. A fresh full run is required;
-  the prior runs are retained only as fail-closed diagnostic evidence.
+- Windows acceptance is **BLOCKED / FAILED**. Run `33371021364` reached a signed
+  candidate, but the physical F1 regression disqualifies it; production, tags,
+  releases, and `latest.json` remain prohibited.
 
 ### Exact-x64 verifier rootfix local verification
 
@@ -417,34 +446,29 @@ value was read back into this checkout.
 
 ## Required closure before calling the fork complete
 
-1. Local receipt-rootfix validation and public-leak audit passed without
-   touching either approval.
-2. Old-source scheduled run `33340123965` and unapproved run `33308322090` were
-   cancelled in the safe order with authenticated `completed/cancelled`
-   read-back. The retained zero-approval, signer, production, tag, and release
-   evidence is recorded in the rootfix receipt.
-3. Receipt-rootfix commit `47a0407a1eb5851b5f6819f5d1400a4cb937e573`
-   was pushed and its exact push CI passed.
-4. Run `33354201384` proved the candidate gates, unsigned Windows runtime
-   smoke, separate EXE/receipt artifacts, Director inner-file read-back,
-   signer-side receipt/input gate, and pre/post EXE invariance. It then failed
-   closed on the multi-architecture Minisign archive inventory before
-   cryptographic verification, signed upload, production, tag, or release.
-5. Commit and push the pre-sign exact x86_64 verifier-preflight/revalidation
-   fix, bind its push CI, and dispatch a new full upstream-sync run. Repeat the
-   unsigned artifact and receipt Director read-back; do not reuse artifact IDs
-   or hashes from the failed run.
-6. After separate authorization for that new run, approve signing, wait for the
-   isolated signer to prove pre/post EXE hash and size invariance, verify the
-   signature with the exact x86_64 Minisign binary, upload the exact two-file
-   signed artifact and one-JSON signing receipt, and confirm `publish-release`
-   pauses on `handy-api-production`. Download that run's exact signed Windows
-   x64 artifact and signing receipt, install the EXE alongside official Handy,
-   and execute the unchecked
-   [Windows acceptance checklist](HANDY-API-WINDOWS-ACCEPTANCE.md).
-7. Preserve the Actions URL, candidate SHA, all artifact IDs/archive digests,
-   inner file sizes/hashes, receipt hashes, and redacted manual evidence in this
-   report.
-8. Only after every blocking item passes, separately approve
-   `handy-api-production`; the same run then verifies its draft bytes,
-   fast-forwards `main`, and publishes the personal stable release.
+1. Keep run `33371021364`'s `handy-api-production` job unapproved and treat its
+   signed artifact as failed physical evidence only. Do not tag, publish, or
+   update `latest.json` from it.
+2. Run the full local/host-independent CI suite on the guard change and build a
+   new native Windows x64 **unsigned diagnostic-only** candidate. Preserve its
+   exact commit, run, artifact ID/digest, installer size/hash, and receipt.
+3. On the physical Windows microphone and normal F1 path, execute class A
+   (5/15/30-second digital silence, quiet room, fan/HVAC, keyboard/mouse) and
+   class B (each delay followed by `네`, `응`, `아니`, `오케이`, or
+   `테스트입니다`). Preserve matching `speech_guard_capture` and
+   `speech_guard_final` lines without private transcript content.
+4. Calibrate run length, density, tail recency, and VAD probability from that
+   physical evidence. Do not raise the `0.3` threshold or add reported phrases
+   to a blacklist as a substitute for calibration. If a stop-adjacent false
+   onset still survives, revise the combined evidence rule and repeat with a
+   new commit/candidate.
+5. Require every no-speech case to produce paste 0, successful-history 0, WAV
+   0, and Local hallucination 0. Require delayed short speech to remain usable
+   with minimal false rejection, and verify normal Korean, F1 stop, and ESC
+   cancellation regressions.
+6. Only after the physical matrix passes may a wholly new signing workflow be
+   dispatched and separately approved. Its signed bytes and receipts must be
+   accepted on Windows before production is considered.
+7. Only after every blocking item passes, separately approve
+   `handy-api-production`; then verify draft bytes before advancing `main`, tag,
+   release, or `latest.json`.

@@ -4,12 +4,27 @@ This matrix supersedes the pre-release Gemini-named product matrix. Gemini
 remains the first cloud STT provider; every product, repository, installer,
 data, updater, and evidence identity below belongs to Handy API.
 
-Overall status: **NOT EXECUTED**
+Overall status: **BLOCKED — PHYSICAL WINDOWS HALLUCINATION REGRESSION**
 
 Target: physical Windows 10/11 x64 system
 
 Rule: leave every item unchecked until its evidence is attached. A build or
 unit-test pass alone is not acceptance.
+
+Run `33371021364` / candidate
+`85ce706aaf998591ac9e9fc7a7e158b252121fa4` is explicitly disqualified. Its
+Windows installer was signed before the physical failure was reported, but its
+`handy-api-production` job remains unapproved. Do not approve production and do
+not create or advance a tag, release, or `latest.json` from that run.
+
+The physical Local Whisper Large V3 / F1 microphone path produced fabricated
+cursor output after long silence and after long silence followed by short real
+speech. The observed output included the Director-supplied strings
+`감사합니다.`, `직원분 IN DevOps님 말씀 뜻밖으로 고맙습니다 부탁드립니다`,
+and `수고하셨습니다.`; some short real utterances were omitted. The failed
+binary did not record the numeric guard fields below, so its RMS, peak, VAD
+counts, and verdicts are **NOT CAPTURED** and must not be reconstructed or
+guessed.
 
 Failed run `33354201384` is diagnostic evidence only: it performed no
 cryptographic signature verification and produced no signed artifact or
@@ -58,6 +73,33 @@ three-asset public release.
       mode/language, input/fixture SHA-256, repetitions, start/end time,
       request-count delta, target-document hash before/after, history-row count
       before/after, recording-WAV count before/after, observed text, and result.
+- [ ] For every physical F1 case, copy the matching `speech_guard_capture` and
+      `speech_guard_final` records. Require `raw_duration_ms`,
+      `output_sample_count`, RMS, peak, `vad_analyzed_frames`,
+      `vad_voiced_frames`, `vad_confirmed_speech_onsets`, `vad_error_frames`,
+      pre-STT verdict, and final post-STT verdict. Also retain the diagnostic
+      run-length, density, tail-position, and VAD-probability fields emitted by
+      the candidate.
+- [ ] Before the matrix, set **Log Level** to `Info` or `Debug` and confirm one
+      stopped F1 capture emits both structured records. A `Warn`/`Error` filter
+      is not evidence that the guard records were absent.
+- [ ] Label every no-speech failure as class A (digital silence, quiet room,
+      fan/HVAC, or keyboard/mouse) and every delayed-short-speech case as class
+      B (5/15/30 seconds of silence followed by a named utterance). Correlate by
+      case timestamp; do not add private dictated text to logs.
+- [ ] After each case returns to Idle, export only the two structured guard
+      records from the exact log opened through **Open Log Folder**:
+
+  ```powershell
+  Select-String -LiteralPath <exact-handy-api-log-path> `
+    -Pattern 'speech_guard_(capture|final)' |
+    Select-Object -Last 2 |
+    ForEach-Object { $_.Line }
+  ```
+
+  The candidate never writes transcript text in these records. Before sharing
+  other surrounding log lines, inspect and redact them separately.
+
 - [ ] Attach screenshots or a screen recording for installation identity,
       settings, F1/ESC behavior, history, Credential Manager target, and update.
 - [ ] Redact API keys, authorization headers, request/response bodies, private
@@ -179,7 +221,7 @@ three-asset public release.
       and byte counts. Delete the unredacted local capture after deriving the
       receipt.
 
-If any gate fails, stop with status **NOT EXECUTED** for all dependent cases.
+If any gate fails, stop with status **BLOCKED** for all dependent cases.
 Do not approve `handy-api-signing` before reviewing the unsigned candidate and
 gates. Do not approve `handy-api-production` merely to obtain the signed
 artifact.
@@ -239,40 +281,46 @@ Notepad file before hashing it again.
       does not re-import them. Then change fork settings and confirm official
       Handy remains unchanged.
 
-## Deterministic audio set
+## Hallucination-regression audio set
 
-- [ ] Create/hash 16 kHz mono WAV fixtures for 2 seconds of digital silence,
-      quiet room tone, fan/HVAC, and keyboard/mouse with no speech. Record the
-      capture source, duration, and SHA-256 for each.
+- [ ] Create/hash 16 kHz mono WAV fixtures at 5, 15, and 30 seconds for digital
+      silence, quiet room tone, fan/HVAC, and keyboard/mouse with no speech.
+      Record the capture source, duration, and SHA-256 for each.
 - [ ] Route each fixed WAV through one named loopback/virtual microphone so
       repetitions use identical bytes and gain. Separately run one live
       physical-microphone pass for room, fan, and keyboard conditions.
-- [ ] Record live physical-microphone utterances `네`, `응`, `아니`, and
-      `오케이` at normal and quiet voice levels, five repetitions each.
+- [ ] On the physical microphone, record `네`, `응`, `아니`, `오케이`, and
+      `테스트입니다` after 5, 15, and 30 seconds of room silence, at normal and
+      quiet voice levels. Repeat each combination five times.
 - [ ] Record one normal Korean sentence, one long prompt with hesitation and
       self-correction, and actual background broadcast speech. Background
       speech is expected to transcribe and is not a v1 failure.
 
 ## Silence and hallucination matrix
 
-For every case, start/stop with F1 and keep Notepad focused. A no-speech pass
-means zero pasted bytes, zero successful-history rows, zero new WAV files, and
-for Gemini, zero transcription requests.
+For every case, start/stop with F1 and keep Notepad focused. The physical
+Windows microphone path is authoritative; file-path and synthetic tests are
+supporting evidence only. A no-speech pass means zero pasted bytes, zero
+successful-history rows, zero new WAV files, zero Local hallucinations, and for
+Gemini, zero transcription requests.
 
-| Case   | Backend           | Input                        | Repetitions | Expected                            | Status       |
-| ------ | ----------------- | ---------------------------- | ----------: | ----------------------------------- | ------------ |
-| HA-S01 | Local Large V3    | digital silence              |          20 | no inference output/side effects    | NOT EXECUTED |
-| HA-S02 | Local Large V3    | quiet room                   |          20 | no hallucinated output/side effects | NOT EXECUTED |
-| HA-S03 | Local Large V3    | fan/HVAC                     |          20 | no hallucinated output/side effects | NOT EXECUTED |
-| HA-S04 | Local Large V3    | keyboard/mouse               |          20 | no hallucinated output/side effects | NOT EXECUTED |
-| HA-S05 | Gemini Smart/Auto | all four fixed fixtures      |      5 each | zero requests and side effects      | NOT EXECUTED |
-| HA-S06 | Local and Gemini  | live room/fan/keyboard       |      1 each | no hallucinated output/side effects | NOT EXECUTED |
-| HA-S07 | Local and Gemini  | four short Korean utterances |      5 each | usable non-empty transcript         | NOT EXECUTED |
-| HA-S08 | Local and Gemini  | real background speech       |      1 each | speech may transcribe               | NOT EXECUTED |
+| Case   | Backend           | Input                                     | Repetitions | Expected                                   | Status       |
+| ------ | ----------------- | ----------------------------------------- | ----------: | ------------------------------------------ | ------------ |
+| HA-S01 | Local Large V3    | 5/15/30 s digital silence                 |     20 each | paste/history/WAV/hallucination all zero   | NOT EXECUTED |
+| HA-S02 | Local Large V3    | 5/15/30 s quiet room                      |     20 each | paste/history/WAV/hallucination all zero   | NOT EXECUTED |
+| HA-S03 | Local Large V3    | 5/15/30 s fan/HVAC                        |     20 each | paste/history/WAV/hallucination all zero   | NOT EXECUTED |
+| HA-S04 | Local Large V3    | 5/15/30 s keyboard/mouse                  |     20 each | paste/history/WAV/hallucination all zero   | NOT EXECUTED |
+| HA-S05 | Local Large V3    | each delay + each named short utterance   |      5 each | usable transcript; false rejects minimized | NOT EXECUTED |
+| HA-S06 | Gemini Smart/Auto | all four fixed no-speech fixture families |      5 each | zero requests and side effects             | NOT EXECUTED |
+| HA-S07 | Local and Gemini  | normal Korean sentence                    |      5 each | usable non-empty transcript                | NOT EXECUTED |
+| HA-S08 | Local and Gemini  | real background speech                    |      1 each | speech may transcribe                      | NOT EXECUTED |
 
 - [ ] Each Local repeated run uses the normal F1 microphone path, not only
       `--transcribe-file`, because the headless file path does not prove the
       capture speech gate.
+- [ ] Do not mark HA-S01 through HA-S08 passed from the synthetic Rust
+      `two_frame_short_korean_utterances_are_preserved` test. It proves only a
+      pure decision-table case, not microphone/VAD/model behavior.
 - [ ] Gemini request-count evidence comes from the sanitized proxy receipt;
       debug logs alone are supporting, not sole, proof of no request.
 
@@ -285,11 +333,13 @@ local model.
 | Case   | Dictation                                         | Expected                                 | Status       |
 | ------ | ------------------------------------------------- | ---------------------------------------- | ------------ |
 | HA-L01 | `네` / `응` / `아니` / `오케이`                   | short speech preserved                   | NOT EXECUTED |
-| HA-L02 | normal Korean sentence                            | accurate paste and one history/WAV entry | NOT EXECUTED |
-| HA-L03 | `GPT-5.6 Sol X-High 다음에 UltraCode로 검증해줘.` | dictionary spelling preserved            | NOT EXECUTED |
-| HA-L04 | `Codex에서 ProjectX 작업을 먼저 확인해줘.`        | code switching preserved                 | NOT EXECUTED |
-| HA-L05 | `Claude Code와 Gemini 결과를 비교해줘.`           | product spelling preserved               | NOT EXECUTED |
-| HA-L06 | long prompt with hesitation/self-correction       | complete usable transcript               | NOT EXECUTED |
+| HA-L02 | `테스트입니다`                                    | short speech preserved                   | NOT EXECUTED |
+| HA-L03 | each HA-L01/L02 phrase after 5/15/30 s silence    | usable text; false rejects minimized     | NOT EXECUTED |
+| HA-L04 | normal Korean sentence                            | accurate paste and one history/WAV entry | NOT EXECUTED |
+| HA-L05 | `GPT-5.6 Sol X-High 다음에 UltraCode로 검증해줘.` | dictionary spelling preserved            | NOT EXECUTED |
+| HA-L06 | `Codex에서 ProjectX 작업을 먼저 확인해줘.`        | code switching preserved                 | NOT EXECUTED |
+| HA-L07 | `Claude Code와 Gemini 결과를 비교해줘.`           | product spelling preserved               | NOT EXECUTED |
+| HA-L08 | long prompt with hesitation/self-correction       | complete usable transcript               | NOT EXECUTED |
 
 - [ ] F1 starts recording, F1 normally stops it, the selected exact model stays
       loaded, current-cursor paste succeeds, and the matching history/WAV entry
@@ -301,8 +351,8 @@ local model.
 
 - [ ] Save a valid disposable key, Test Connection succeeds, and Gemini is
       selectable without downloading or changing the local model.
-- [ ] Run HA-L01 through HA-L06 in Smart/Auto and Verbatim/Auto; run HA-L03
-      through HA-L05 once with `ko-KR`. Record request count, latency, exact
+- [ ] Run HA-L01 through HA-L08 in Smart/Auto and Verbatim/Auto; run HA-L05
+      through HA-L07 once with `ko-KR`. Record request count, latency, exact
       transcript, paste, history, and WAV outcome.
 - [ ] Add `GPT-5.6 Sol`, `X-High`, `UltraCode`, `Codex`, `Claude Code`, and
       `ProjectX` to the existing Handy Dictionary; confirm intended spellings

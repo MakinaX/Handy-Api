@@ -1,0 +1,262 @@
+name: "Windows Hallucination Diagnostic"
+
+on:
+  push:
+    branches:
+      - "codex/stt-physical-hallucination-guard"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-hallucination-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-gates:
+    if: github.repository == 'MakinaX/Handy-Api'
+    uses: ./.github/workflows/handy-api-ci.yml
+    with:
+      ref: ${{ github.sha }}
+
+  build-unsigned-windows-x64-diagnostic:
+    if: github.repository == 'MakinaX/Handy-Api'
+    needs: source-gates
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact diagnostic source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Enable Windows long paths
+        shell: pwsh
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --system core.longpaths true
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.88.0
+
+      - name: Install Vulkan SDK
+        uses: humbletim/install-vulkan-sdk@30ba978f977e81b72d091fc8888feb1fb26f9aff # v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+
+      - name: Locate VC++ runtime for app-local bundling
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsRoot = & $vswhere -latest -products * -property installationPath
+          if (-not $vsRoot) { throw "vswhere found no Visual Studio installation" }
+          $versionFile = Join-Path $vsRoot "VC\Auxiliary\Build\Microsoft.VCRedistVersion.default.txt"
+          $redistVersion = (Get-Content $versionFile).Trim()
+          $archDir = Join-Path $vsRoot "VC\Redist\MSVC\$redistVersion\x64"
+          $crt = Get-ChildItem $archDir -Directory -Filter "Microsoft.VC*.CRT" |
+            Sort-Object Name | Select-Object -Last 1
+          $omp = Get-ChildItem $archDir -Directory -Filter "Microsoft.VC*.OpenMP" |
+            Sort-Object Name | Select-Object -Last 1
+          if (-not $crt -or -not (Test-Path (Join-Path $crt.FullName "msvcp140.dll"))) {
+            throw "VC++ CRT redistributable is unavailable"
+          }
+          if (-not $omp -or -not (Test-Path (Join-Path $omp.FullName "vcomp140.dll"))) {
+            throw "VC++ OpenMP redistributable is unavailable"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "HANDY_VC_REDIST_DIRS=$($crt.FullName);$($omp.FullName)"
+
+      - name: Install baseline ONNX Runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ortVersion = "1.24.2"
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$ortVersion/onnxruntime-win-x64-$ortVersion.zip"
+          Invoke-WebRequest -Uri $url -OutFile ort.zip
+          Expand-Archive -Path ort.zip -DestinationPath ort-dist -Force
+          $ortLib = (Resolve-Path "ort-dist/onnxruntime-win-x64-$ortVersion/lib").Path
+          Add-Content -Path $env:GITHUB_ENV -Value "ORT_LIB_LOCATION=$ortLib"
+          Add-Content -Path $env:GITHUB_ENV -Value "ORT_PREFER_DYNAMIC_LINK=1"
+
+      - name: Install SPIR-V headers
+        shell: pwsh
+        run: |
+          vcpkg install spirv-headers:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install spirv-headers failed" }
+          $prefix = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" -replace '\\','/'
+          Add-Content -Path $env:GITHUB_ENV -Value "CMAKE_PREFIX_PATH=$prefix"
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build unsigned diagnostic NSIS installer
+        run: >-
+          bun run tauri build
+          --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          --target x86_64-pc-windows-msvc
+          --bundles nsis
+          -- --locked
+
+      - name: Verify and stage diagnostic candidate
+        id: verify-diagnostic
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne "MakinaX/Handy-Api" -or
+              $env:GITHUB_RUN_ID -notmatch '^[1-9][0-9]*$' -or
+              $env:CANDIDATE_SHA -notmatch '^[0-9a-f]{40}$') {
+            throw "Diagnostic candidate identity is invalid"
+          }
+
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoVersion = [regex]::Match(
+            (Get-Content src-tauri/Cargo.toml -Raw),
+            '(?m)^version = "([^"]+)"$'
+          ).Groups[1].Value
+          if ($packageVersion -cne $tauriVersion -or $packageVersion -cne $cargoVersion) {
+            throw "Package, Tauri, and Cargo versions differ"
+          }
+
+          $bundle = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          $generatedName = "Handy API_$($packageVersion)_x64-setup.exe"
+          $candidateName = "Handy.API_$($packageVersion)_x64-setup.exe"
+          $generated = @(Get-ChildItem $bundle -File -Filter "*-setup.exe")
+          if ($generated.Count -ne 1 -or $generated[0].Name -cne $generatedName) {
+            throw "Expected exactly one raw NSIS installer: $generatedName"
+          }
+          if (Get-ChildItem $bundle -File -Filter "*.sig") {
+            throw "Diagnostic build unexpectedly emitted a signature"
+          }
+          $preRenameHash = (Get-FileHash -LiteralPath $generated[0].FullName `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          $candidatePath = Join-Path $bundle $candidateName
+          Move-Item -LiteralPath $generated[0].FullName -Destination $candidatePath
+          $candidate = Get-Item -LiteralPath $candidatePath
+          $candidateHash = (Get-FileHash -LiteralPath $candidatePath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($candidateHash -cne $preRenameHash) {
+            throw "Canonical filename change altered installer bytes"
+          }
+          $authenticode = Get-AuthenticodeSignature -LiteralPath $candidatePath
+          if ($authenticode.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
+            throw "Diagnostic installer must remain Authenticode NotSigned"
+          }
+
+          $stagedDlls = @(Get-ChildItem "src-tauri/transcribe-libs" -File -Filter "*.dll")
+          if ($stagedDlls.Count -eq 0) {
+            throw "src-tauri/transcribe-libs contains no staged runtime DLLs"
+          }
+          $installRoot = Join-Path $env:RUNNER_TEMP "handy-api-diagnostic-$([Guid]::NewGuid())"
+          New-Item -ItemType Directory -Path $installRoot | Out-Null
+          try {
+            $install = Start-Process -FilePath $candidate.FullName `
+              -ArgumentList @("/S", "/PORTABLE", "/D=$installRoot") `
+              -Wait -PassThru
+            if ($install.ExitCode -ne 0) {
+              throw "Silent NSIS portable install failed with exit code $($install.ExitCode)"
+            }
+            $executables = @(Get-ChildItem $installRoot -Recurse -File -Filter "handy-api.exe")
+            if ($executables.Count -ne 1) {
+              throw "Installed package must contain exactly one handy-api.exe"
+            }
+            if (Get-ChildItem $installRoot -Recurse -File -Filter "handy.exe") {
+              throw "Installed package contains the upstream executable identity"
+            }
+            foreach ($dll in $stagedDlls) {
+              if (-not (Get-ChildItem $installRoot -Recurse -File -Filter $dll.Name)) {
+                throw "Installed package is missing staged runtime DLL $($dll.Name)"
+              }
+            }
+            $deviceOutput = (& $executables[0].FullName --list-devices 2>&1 | Out-String)
+            $deviceOutput | Write-Host
+            if ($LASTEXITCODE -ne 0) {
+              throw "Installed handy-api.exe --list-devices failed"
+            }
+          } finally {
+            if (Test-Path $installRoot) {
+              Remove-Item -Recurse -Force $installRoot
+            }
+          }
+
+          $postSmokeHash = (Get-FileHash -LiteralPath $candidatePath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($postSmokeHash -cne $candidateHash) {
+            throw "Runtime smoke altered installer bytes"
+          }
+
+          New-Item -ItemType Directory -Path diagnostic-candidate -Force | Out-Null
+          Copy-Item -LiteralPath $candidatePath -Destination diagnostic-candidate
+          $receipt = [ordered]@{
+            schema_version = 1
+            purpose = "physical-windows-hallucination-regression-diagnostic"
+            repository = $env:GITHUB_REPOSITORY
+            github_run_id = [string]$env:GITHUB_RUN_ID
+            candidate_sha = $env:CANDIDATE_SHA
+            version = $packageVersion
+            installer_filename = $candidateName
+            installer_size_bytes = [int64]$candidate.Length
+            installer_sha256 = $candidateHash
+            signed = $false
+            authenticode_status = [string]$authenticode.Status
+            signing_eligible = $false
+            release_eligible = $false
+          }
+          $receiptPath = "diagnostic-candidate/windows-hallucination-diagnostic-receipt.json"
+          $receipt | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $receiptPath `
+            -Encoding utf8NoBOM
+          $files = @(Get-ChildItem diagnostic-candidate -File)
+          if ($files.Count -ne 2 -or
+              -not (Test-Path "diagnostic-candidate/$candidateName" -PathType Leaf) -or
+              -not (Test-Path $receiptPath -PathType Leaf)) {
+            throw "Diagnostic artifact inventory must be one EXE plus one receipt"
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$packageVersion"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "installer-sha256=$candidateHash"
+          Get-FileHash -LiteralPath "diagnostic-candidate/$candidateName", $receiptPath `
+            -Algorithm SHA256 | Format-List
+
+      - name: Upload unsigned diagnostic candidate
+        id: upload-diagnostic
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: handy-api-windows-x64-unsigned-diagnostic-${{ github.sha }}
+          path: diagnostic-candidate/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Record non-release artifact identity
+        shell: pwsh
+        env:
+          ARTIFACT_ID: ${{ steps.upload-diagnostic.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload-diagnostic.outputs.artifact-digest }}
+          INSTALLER_SHA256: ${{ steps.verify-diagnostic.outputs.installer-sha256 }}
+          VERSION: ${{ steps.verify-diagnostic.outputs.version }}
+        run: |
+          @"
+          ## Unsigned physical-Windows diagnostic candidate
+
+          - Commit: ``${{ github.sha }}``
+          - Version: ``$env:VERSION``
+          - Artifact ID: ``$env:ARTIFACT_ID``
+          - Artifact digest: ``$env:ARTIFACT_DIGEST``
+          - Installer SHA-256: ``$env:INSTALLER_SHA256``
+          - Signed: ``false``
+          - Authenticode: ``NotSigned``
+          - Signing eligible: ``false``
+          - Release eligible: ``false``
+          "@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY

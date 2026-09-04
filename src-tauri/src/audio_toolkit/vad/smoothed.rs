@@ -23,6 +23,14 @@ pub struct SmoothedVad {
     analyzed_frames: usize,
     voiced_frames: usize,
     confirmed_speech_onsets: usize,
+    current_voiced_run_frames: usize,
+    longest_voiced_run_frames: usize,
+    latest_confirmed_run_frames: usize,
+    last_voiced_frame: Option<usize>,
+    last_confirmed_speech_frame: Option<usize>,
+    probability_frames: usize,
+    probability_sum: f64,
+    max_voice_probability: Option<f32>,
 
     temp_out: Vec<f32>,
 }
@@ -46,6 +54,14 @@ impl SmoothedVad {
             analyzed_frames: 0,
             voiced_frames: 0,
             confirmed_speech_onsets: 0,
+            current_voiced_run_frames: 0,
+            longest_voiced_run_frames: 0,
+            latest_confirmed_run_frames: 0,
+            last_voiced_frame: None,
+            last_confirmed_speech_frame: None,
+            probability_frames: 0,
+            probability_sum: 0.0,
+            max_voice_probability: None,
             temp_out: Vec::new(),
         }
     }
@@ -73,6 +89,31 @@ impl VoiceActivityDetector for SmoothedVad {
         let is_voice = self.inner_vad.is_voice(frame)?;
         self.analyzed_frames += 1;
         self.voiced_frames += usize::from(is_voice);
+        if let Some(probability) = self
+            .inner_vad
+            .last_voice_probability()
+            .filter(|value| value.is_finite())
+        {
+            self.probability_frames = self.probability_frames.saturating_add(1);
+            self.probability_sum += f64::from(probability);
+            self.max_voice_probability = Some(
+                self.max_voice_probability
+                    .map_or(probability, |current| current.max(probability)),
+            );
+        }
+        if is_voice {
+            self.current_voiced_run_frames = self.current_voiced_run_frames.saturating_add(1);
+            self.longest_voiced_run_frames = self
+                .longest_voiced_run_frames
+                .max(self.current_voiced_run_frames);
+            self.last_voiced_frame = Some(self.analyzed_frames);
+            if self.current_voiced_run_frames >= self.onset_frames {
+                self.latest_confirmed_run_frames = self.current_voiced_run_frames;
+                self.last_confirmed_speech_frame = Some(self.analyzed_frames);
+            }
+        } else {
+            self.current_voiced_run_frames = 0;
+        }
         if let Some(last) = self.frame_buffer.back_mut() {
             last.voiced = is_voice;
         }
@@ -159,10 +200,22 @@ impl VoiceActivityDetector for SmoothedVad {
     }
 
     fn activity_report(&self) -> Option<VadActivityReport> {
+        let mean_voice_probability = (self.probability_frames > 0)
+            .then(|| (self.probability_sum / self.probability_frames as f64) as f32);
         Some(VadActivityReport {
             analyzed_frames: self.analyzed_frames,
             voiced_frames: self.voiced_frames,
             confirmed_speech_onsets: self.confirmed_speech_onsets,
+            onset_frames: self.onset_frames,
+            longest_voiced_run_frames: self.longest_voiced_run_frames,
+            latest_confirmed_run_frames: self.latest_confirmed_run_frames,
+            last_voiced_frame: self.last_voiced_frame,
+            last_confirmed_speech_frame: self.last_confirmed_speech_frame,
+            hangover_frames: self.hangover_frames,
+            probability_frames: self.probability_frames,
+            mean_voice_probability,
+            max_voice_probability: self.max_voice_probability,
+            voice_probability_threshold: self.inner_vad.voice_probability_threshold(),
         })
     }
 
@@ -175,6 +228,14 @@ impl VoiceActivityDetector for SmoothedVad {
         self.analyzed_frames = 0;
         self.voiced_frames = 0;
         self.confirmed_speech_onsets = 0;
+        self.current_voiced_run_frames = 0;
+        self.longest_voiced_run_frames = 0;
+        self.latest_confirmed_run_frames = 0;
+        self.last_voiced_frame = None;
+        self.last_confirmed_speech_frame = None;
+        self.probability_frames = 0;
+        self.probability_sum = 0.0;
+        self.max_voice_probability = None;
         self.temp_out.clear();
     }
 }
@@ -186,23 +247,39 @@ mod tests {
     /// Inner VAD that replays a scripted voice/no-voice sequence.
     struct ScriptedVad {
         script: VecDeque<bool>,
+        last_probability: Option<f32>,
     }
 
     impl ScriptedVad {
         fn new(script: &[bool]) -> Self {
             Self {
                 script: script.iter().copied().collect(),
+                last_probability: None,
             }
         }
     }
 
     impl VoiceActivityDetector for ScriptedVad {
         fn push_frame<'a>(&'a mut self, frame: &'a [f32]) -> Result<VadFrame<'a>> {
-            if self.script.pop_front().unwrap_or(false) {
+            let voiced = self.script.pop_front().unwrap_or(false);
+            self.last_probability = Some(if voiced { 0.85 } else { 0.05 });
+            if voiced {
                 Ok(VadFrame::Speech(frame))
             } else {
                 Ok(VadFrame::Noise)
             }
+        }
+
+        fn last_voice_probability(&self) -> Option<f32> {
+            self.last_probability
+        }
+
+        fn voice_probability_threshold(&self) -> Option<f32> {
+            Some(0.3)
+        }
+
+        fn reset(&mut self) {
+            self.last_probability = None;
         }
     }
 
@@ -259,6 +336,33 @@ mod tests {
         assert_eq!(activity.analyzed_frames, 2);
         assert_eq!(activity.voiced_frames, 2);
         assert_eq!(activity.confirmed_speech_onsets, 1);
+        assert_eq!(activity.onset_frames, 2);
+        assert_eq!(activity.longest_voiced_run_frames, 2);
+        assert_eq!(activity.latest_confirmed_run_frames, 2);
+        assert_eq!(activity.last_voiced_frame, Some(2));
+        assert_eq!(activity.last_confirmed_speech_frame, Some(2));
+        assert_eq!(activity.hangover_frames, 2);
+        assert_eq!(activity.probability_frames, 2);
+        assert_eq!(activity.mean_voice_probability, Some(0.85));
+        assert_eq!(activity.max_voice_probability, Some(0.85));
+        assert_eq!(activity.voice_probability_threshold, Some(0.3));
+    }
+
+    #[test]
+    fn activity_report_keeps_last_confirmed_run_when_later_positive_is_isolated() {
+        let mut vad = smoothed(&[false, true, true, false, true, false, false], 2);
+        for value in 0..7 {
+            let _ = vad.push_frame(&frame(value as f32)).unwrap();
+        }
+
+        let activity = vad.activity_report().unwrap();
+        assert_eq!(activity.analyzed_frames, 7);
+        assert_eq!(activity.voiced_frames, 3);
+        assert_eq!(activity.confirmed_speech_onsets, 1);
+        assert_eq!(activity.longest_voiced_run_frames, 2);
+        assert_eq!(activity.latest_confirmed_run_frames, 2);
+        assert_eq!(activity.last_voiced_frame, Some(5));
+        assert_eq!(activity.last_confirmed_speech_frame, Some(3));
     }
 
     #[test]
@@ -269,6 +373,19 @@ mod tests {
         assert_eq!(vad.activity_report().unwrap().voiced_frames, 2);
 
         vad.reset();
-        assert_eq!(vad.activity_report().unwrap(), VadActivityReport::default());
+        let activity = vad.activity_report().unwrap();
+        assert_eq!(activity.analyzed_frames, 0);
+        assert_eq!(activity.voiced_frames, 0);
+        assert_eq!(activity.confirmed_speech_onsets, 0);
+        assert_eq!(activity.onset_frames, 2);
+        assert_eq!(activity.longest_voiced_run_frames, 0);
+        assert_eq!(activity.latest_confirmed_run_frames, 0);
+        assert_eq!(activity.last_voiced_frame, None);
+        assert_eq!(activity.last_confirmed_speech_frame, None);
+        assert_eq!(activity.hangover_frames, 2);
+        assert_eq!(activity.probability_frames, 0);
+        assert_eq!(activity.mean_voice_probability, None);
+        assert_eq!(activity.max_voice_probability, None);
+        assert_eq!(activity.voice_probability_threshold, Some(0.3));
     }
 }

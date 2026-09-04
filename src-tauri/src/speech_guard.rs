@@ -23,6 +23,18 @@ pub struct CaptureEvidence {
     pub vad_analyzed_frames: usize,
     pub vad_voiced_frames: usize,
     pub vad_confirmed_speech_onsets: usize,
+    pub vad_onset_frames: usize,
+    pub vad_longest_voiced_run_frames: usize,
+    pub vad_latest_confirmed_run_frames: usize,
+    /// One-based raw VAD frame index.
+    pub vad_last_voiced_frame: Option<usize>,
+    /// One-based raw VAD frame index for the most recent confirmed run.
+    pub vad_last_confirmed_speech_frame: Option<usize>,
+    pub vad_hangover_frames: usize,
+    pub vad_probability_frames: usize,
+    pub vad_mean_probability: Option<f32>,
+    pub vad_max_probability: Option<f32>,
+    pub vad_probability_threshold: Option<f32>,
     pub vad_error_frames: usize,
 }
 
@@ -40,6 +52,16 @@ impl CaptureEvidence {
             vad_analyzed_frames: 0,
             vad_voiced_frames: 0,
             vad_confirmed_speech_onsets: 0,
+            vad_onset_frames: 0,
+            vad_longest_voiced_run_frames: 0,
+            vad_latest_confirmed_run_frames: 0,
+            vad_last_voiced_frame: None,
+            vad_last_confirmed_speech_frame: None,
+            vad_hangover_frames: 0,
+            vad_probability_frames: 0,
+            vad_mean_probability: None,
+            vad_max_probability: None,
+            vad_probability_threshold: None,
             vad_error_frames: 0,
         }
     }
@@ -67,13 +89,67 @@ impl CaptureEvidence {
         }
     }
 
-    fn crest_factor(&self) -> f32 {
+    pub fn vad_frames_since_last_voice(&self) -> Option<usize> {
+        frames_since(self.vad_analyzed_frames, self.vad_last_voiced_frame)
+    }
+
+    pub fn vad_frames_since_last_confirmed_speech(&self) -> Option<usize> {
+        frames_since(
+            self.vad_analyzed_frames,
+            self.vad_last_confirmed_speech_frame,
+        )
+    }
+
+    pub fn crest_factor(&self) -> f32 {
         if self.rms_amplitude <= f32::EPSILON {
             0.0
         } else {
             self.peak_amplitude / self.rms_amplitude
         }
     }
+
+    /// Whether the last confirmed raw-VAD run reaches the capture tail. The
+    /// window is the detector's already-configured hangover, not a second
+    /// independently tuned time threshold. The existing two-frame onset stays
+    /// sufficient at the capture tail so quiet acknowledgements are not given
+    /// a new, uncalibrated three-frame requirement.
+    pub fn vad_has_recent_confirmed_tail(&self) -> bool {
+        if self.vad_onset_frames == 0 || self.vad_hangover_frames == 0 {
+            return false;
+        }
+
+        let confirmed_tail_is_recent = self
+            .vad_frames_since_last_confirmed_speech()
+            .is_some_and(|frames| frames <= self.vad_hangover_frames);
+        self.vad_latest_confirmed_run_frames >= self.vad_onset_frames && confirmed_tail_is_recent
+    }
+
+    /// Minimum whole-capture voiced density used for stale speech evidence.
+    /// This is derived from the active VAD onset/hangover contract: at least
+    /// `onset_frames / hangover_frames` of analyzed frames must be raw-positive.
+    pub fn vad_required_density(&self) -> Option<f32> {
+        (self.vad_hangover_frames > 0 && self.vad_onset_frames > 0)
+            .then(|| self.vad_onset_frames as f32 / self.vad_hangover_frames as f32)
+    }
+
+    pub fn vad_has_sustained_density(&self) -> bool {
+        if self.vad_analyzed_frames == 0
+            || self.vad_onset_frames == 0
+            || self.vad_hangover_frames == 0
+            || self.vad_longest_voiced_run_frames <= self.vad_onset_frames
+        {
+            return false;
+        }
+
+        (self.vad_voiced_frames as u128 * self.vad_hangover_frames as u128)
+            >= (self.vad_analyzed_frames as u128 * self.vad_onset_frames as u128)
+    }
+}
+
+fn frames_since(analyzed_frames: usize, one_based_frame: Option<usize>) -> Option<usize> {
+    one_based_frame
+        .filter(|frame| *frame > 0 && *frame <= analyzed_frames)
+        .map(|frame| analyzed_frames - frame)
 }
 
 /// Audio returned from a completed recorder session.
@@ -133,9 +209,13 @@ pub enum TranscriptVerdict {
 }
 
 // Calibration notes:
-// - Handy/Silero works on 30 ms frames.  Two positive frames (60 ms) are the
-//   existing onset contract and cover short Korean acknowledgements such as
-//   "네" and "응"; this guard must never raise that onset requirement.
+// - Handy/Silero works on 30 ms frames. Two positive frames (60 ms) remain the
+//   capture onset contract. A confirmed onset is no longer permanent proof for
+//   the whole recording: an onset remains affirmative while it is inside the
+//   existing tail window. Once stale, it needs both a run beyond the bare
+//   onset and enough whole-capture voiced density. "Recent" and the density
+//   floor reuse the session's existing VAD onset/hangover contract rather than
+//   introducing an independently guessed time or ratio threshold.
 // - PCM thresholds are dBFS-derived, not visualizer values.  0.006 RMS is
 //   about -44.4 dBFS and separates the deterministic room/fan calibration
 //   fixtures from deliberately quiet speech fixtures.  Energy alone never
@@ -151,6 +231,14 @@ const ELECTRICAL_SILENCE_RMS: f32 = 0.000_032;
 const ELECTRICAL_SILENCE_PEAK: f32 = 0.000_1;
 const QUIET_NO_VOICE_RMS: f32 = 0.006;
 const IMPULSE_NOISE_CREST_FACTOR: f32 = 18.0;
+
+fn has_affirmative_confirmed_speech(evidence: &CaptureEvidence) -> bool {
+    if evidence.vad_confirmed_speech_onsets == 0 || evidence.vad_onset_frames == 0 {
+        return false;
+    }
+
+    evidence.vad_has_recent_confirmed_tail() || evidence.vad_has_sustained_density()
+}
 
 /// Pure pre-provider speech-presence decision.
 pub fn pre_stt_verdict(evidence: &CaptureEvidence) -> SpeechPresenceVerdict {
@@ -171,10 +259,10 @@ pub fn pre_stt_verdict(evidence: &CaptureEvidence) -> SpeechPresenceVerdict {
         return SpeechPresenceVerdict::NoSpeech;
     }
 
-    // A successful two-frame onset is affirmative evidence even for a 60 ms
-    // utterance.  Do this before duration/noise heuristics to avoid clipping
-    // short Korean responses.
-    if evidence.vad_confirmed_speech_onsets > 0 {
+    // A confirmed onset is affirmative only while supported by duration or
+    // recency. This preserves a short tail utterance without allowing one stale
+    // two-frame noise blip to bless an arbitrarily long capture forever.
+    if has_affirmative_confirmed_speech(evidence) {
         return SpeechPresenceVerdict::Speech;
     }
 
@@ -209,7 +297,7 @@ pub fn pre_stt_verdict(evidence: &CaptureEvidence) -> SpeechPresenceVerdict {
 
 // Post-STT calibration is intentionally stricter than the provider's own
 // defaults: >=0.80 no-speech or <=0.15 transcript confidence is a secondary
-// signal only.  Neither threshold, a transcript phrase, nor repetition can
+// signal only. Neither threshold, a transcript phrase, nor repetition can
 // reject when capture has affirmative speech evidence.
 const PROVIDER_NO_SPEECH_THRESHOLD: f32 = 0.80;
 const PROVIDER_LOW_CONFIDENCE_THRESHOLD: f32 = 0.15;
@@ -228,14 +316,7 @@ pub fn post_stt_verdict(
         return TranscriptVerdict::RejectLikelyHallucination;
     }
 
-    if pre_stt == SpeechPresenceVerdict::Speech {
-        return TranscriptVerdict::Accept;
-    }
-
-    // Stage B returns Speech for every confirmed two-frame onset. A Borderline
-    // call with an onset can only come from a future caller that supplied an
-    // inconsistent pre-verdict; preserve the affirmative microphone evidence.
-    if capture.vad_confirmed_speech_onsets > 0 {
+    if pre_stt == SpeechPresenceVerdict::Speech && has_affirmative_confirmed_speech(capture) {
         return TranscriptVerdict::Accept;
     }
 
@@ -256,12 +337,11 @@ pub fn post_stt_verdict(
         .unwrap_or_else(|| matches_known_hallucination_pattern(transcript));
     let anomalous_transcript = known_pattern || has_repetition_anomaly(transcript);
 
-    // Borderline means the microphone supplied no confirmed onset. RMS alone
-    // cannot rescue it: loud HVAC, fans, and keyboard impulses may all have
-    // substantial energy. Normal-looking prose is not proof of speech either.
-    // Fail closed unless the provider supplies explicit positive speech or
-    // confidence evidence; negative metadata or an anomaly wins even if
-    // provider fields contradict one another.
+    // Borderline means the microphone supplied no durable affirmative evidence.
+    // It can now include a stale/sparse confirmed onset, so neither that onset,
+    // RMS, nor normal-looking prose may rescue the transcript. Fail closed
+    // unless the provider supplies explicit positive speech or confidence
+    // evidence; negative metadata or an anomaly wins even if fields conflict.
     if provider_no_speech
         || provider_low_confidence
         || anomalous_transcript
@@ -364,6 +444,16 @@ mod tests {
             vad_analyzed_frames: analyzed,
             vad_voiced_frames: voiced,
             vad_confirmed_speech_onsets: usize::from(voiced >= 2),
+            vad_onset_frames: 2,
+            vad_longest_voiced_run_frames: voiced,
+            vad_latest_confirmed_run_frames: if voiced >= 2 { voiced } else { 0 },
+            vad_last_voiced_frame: (voiced > 0).then_some(analyzed),
+            vad_last_confirmed_speech_frame: (voiced >= 2).then_some(analyzed),
+            vad_hangover_frames: 15,
+            vad_probability_frames: 0,
+            vad_mean_probability: None,
+            vad_max_probability: None,
+            vad_probability_threshold: None,
             vad_error_frames: errors,
         }
     }
@@ -389,29 +479,37 @@ mod tests {
 
     #[test]
     fn digital_silence_is_no_speech() {
-        let samples = vec![0.0; RATE as usize * 2];
-        let evidence = evidence_from_signal(&samples, 66, 0, 0, 0);
-        assert_eq!(pre_stt_verdict(&evidence), SpeechPresenceVerdict::NoSpeech);
+        for duration_ms in [5_000, 15_000, 30_000] {
+            let samples = vec![0.0; RATE as usize * duration_ms / 1_000];
+            let evidence = evidence_from_signal(&samples, samples.len() / 480, 0, 0, 0);
+            assert_eq!(
+                pre_stt_verdict(&evidence),
+                SpeechPresenceVerdict::NoSpeech,
+                "{duration_ms} ms digital silence"
+            );
+        }
     }
 
     #[test]
     fn room_fan_and_keyboard_like_evidence_are_no_speech() {
-        let room = deterministic_noise(2_000, 0.001);
-        let fan = sine(2_000, 0.006, 120.0);
-        let mut keyboard = vec![0.0; RATE as usize * 2];
-        for index in (800..keyboard.len()).step_by(2_400) {
-            keyboard[index] = 0.12;
-            keyboard[index + 1] = -0.08;
-        }
+        for duration_ms in [5_000, 15_000, 30_000] {
+            let room = deterministic_noise(duration_ms, 0.001);
+            let fan = sine(duration_ms, 0.006, 120.0);
+            let mut keyboard = vec![0.0; RATE as usize * duration_ms / 1_000];
+            for index in (800..keyboard.len()).step_by(2_400) {
+                keyboard[index] = 0.12;
+                keyboard[index + 1] = -0.08;
+            }
 
-        for (name, samples) in [("room", room), ("fan", fan), ("keyboard", keyboard)] {
-            let frames = samples.len() / 480;
-            let evidence = evidence_from_signal(&samples, frames, 0, 0, samples.len());
-            assert_eq!(
-                pre_stt_verdict(&evidence),
-                SpeechPresenceVerdict::NoSpeech,
-                "{name} fixture"
-            );
+            for (name, samples) in [("room", room), ("fan", fan), ("keyboard", keyboard)] {
+                let frames = samples.len() / 480;
+                let evidence = evidence_from_signal(&samples, frames, 0, 0, samples.len());
+                assert_eq!(
+                    pre_stt_verdict(&evidence),
+                    SpeechPresenceVerdict::NoSpeech,
+                    "{duration_ms} ms {name} fixture"
+                );
+            }
         }
     }
 
@@ -435,6 +533,117 @@ mod tests {
                 TranscriptVerdict::Accept
             );
         }
+    }
+
+    #[test]
+    fn stale_sparse_two_frame_onset_is_not_permanent_speech_evidence() {
+        let reported_failures = [
+            "감사합니다.",
+            "직원분 IN DevOps님 말씀 뜻밖으로 고맙습니다 부탁드립니다",
+            "수고하셨습니다.",
+        ];
+
+        for transcript in reported_failures {
+            assert!(
+                !matches_known_hallucination_pattern(transcript),
+                "physical regression phrases must not be added to the lexical pattern set"
+            );
+        }
+
+        for duration_ms in [5_000, 15_000, 30_000] {
+            let samples = deterministic_noise(duration_ms, 0.012);
+            let analyzed = samples.len() / 480;
+            let mut evidence = evidence_from_signal(&samples, analyzed, 2, 0, samples.len());
+            evidence.vad_last_voiced_frame = Some(2);
+            evidence.vad_last_confirmed_speech_frame = Some(2);
+
+            let pre = pre_stt_verdict(&evidence);
+            assert_eq!(
+                pre,
+                SpeechPresenceVerdict::Borderline,
+                "{duration_ms} ms stale onset"
+            );
+            for transcript in reported_failures {
+                assert_eq!(
+                    post_stt_verdict(pre, &evidence, transcript, PostSttEvidence::default()),
+                    TranscriptVerdict::RejectLikelyHallucination,
+                    "{duration_ms} ms stale onset: {transcript}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recent_two_frame_tail_preserves_short_korean_after_long_silence() {
+        for duration_ms in [5_000, 15_000, 30_000] {
+            for transcript in ["네", "응", "아니", "오케이", "테스트입니다"] {
+                let samples = deterministic_noise(duration_ms, 0.012);
+                let analyzed = samples.len() / 480;
+                let evidence = evidence_from_signal(&samples, analyzed, 2, 0, samples.len());
+                let pre = pre_stt_verdict(&evidence);
+                assert_eq!(
+                    pre,
+                    SpeechPresenceVerdict::Speech,
+                    "{duration_ms} ms recent short utterance {transcript}"
+                );
+                assert_eq!(
+                    post_stt_verdict(pre, &evidence, transcript, PostSttEvidence::default()),
+                    TranscriptVerdict::Accept,
+                    "{duration_ms} ms recent short utterance {transcript}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_sparse_three_frame_run_is_not_sustained_capture_evidence() {
+        let samples = sine(30_000, 0.028, 205.0);
+        let analyzed = samples.len() / 480;
+        let mut evidence = evidence_from_signal(&samples, analyzed, 3, 0, samples.len());
+        evidence.vad_last_voiced_frame = Some(3);
+        evidence.vad_last_confirmed_speech_frame = Some(3);
+
+        assert_eq!(
+            pre_stt_verdict(&evidence),
+            SpeechPresenceVerdict::Borderline,
+            "one stale 90 ms run cannot bless a 30 second capture"
+        );
+    }
+
+    #[test]
+    fn dense_sustained_capture_survives_a_long_trailing_pause() {
+        let samples = sine(30_000, 0.028, 205.0);
+        let analyzed = samples.len() / 480;
+        let mut evidence = evidence_from_signal(&samples, analyzed, 180, 0, samples.len());
+        evidence.vad_last_voiced_frame = Some(180);
+        evidence.vad_last_confirmed_speech_frame = Some(180);
+
+        assert_eq!(evidence.vad_required_density(), Some(2.0 / 15.0));
+        assert!(evidence.vad_has_sustained_density());
+        assert_eq!(
+            pre_stt_verdict(&evidence),
+            SpeechPresenceVerdict::Speech,
+            "sustained, capture-dense speech remains affirmative when it is not recent"
+        );
+    }
+
+    #[test]
+    fn inconsistent_speech_preverdict_cannot_restore_stale_sparse_onset_bypass() {
+        let samples = deterministic_noise(15_000, 0.012);
+        let analyzed = samples.len() / 480;
+        let mut evidence = evidence_from_signal(&samples, analyzed, 2, 0, samples.len());
+        evidence.vad_last_voiced_frame = Some(2);
+        evidence.vad_last_confirmed_speech_frame = Some(2);
+
+        assert_eq!(
+            post_stt_verdict(
+                SpeechPresenceVerdict::Speech,
+                &evidence,
+                "평범해 보이는 문장입니다.",
+                PostSttEvidence::default(),
+            ),
+            TranscriptVerdict::RejectLikelyHallucination
+        );
     }
 
     #[test]

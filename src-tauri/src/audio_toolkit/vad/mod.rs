@@ -31,6 +31,20 @@ pub trait VoiceActivityDetector: Send + Sync {
         Ok(self.push_frame(frame)?.is_speech())
     }
 
+    /// Probability produced for the most recently analyzed frame, when the
+    /// detector exposes one. This is diagnostic evidence only: callers must
+    /// not assume that every VAD family has comparable probability semantics.
+    fn last_voice_probability(&self) -> Option<f32> {
+        None
+    }
+
+    /// Decision threshold paired with [`Self::last_voice_probability`], when
+    /// available. Keeping the threshold beside the observed probabilities
+    /// makes physical calibration receipts self-describing.
+    fn voice_probability_threshold(&self) -> Option<f32> {
+        None
+    }
+
     /// Set the post-speech hangover tail (in 30 ms frames) applied to
     /// subsequent frames. Detectors without a smoothing tail can ignore this.
     fn set_hangover_frames(&mut self, _frames: usize) {}
@@ -52,13 +66,33 @@ pub trait VoiceActivityDetector: Send + Sync {
     fn reset(&mut self) {}
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct VadActivityReport {
     pub analyzed_frames: usize,
     pub voiced_frames: usize,
     /// Number of times the detector satisfied its consecutive-frame onset
     /// contract and entered confirmed speech.
     pub confirmed_speech_onsets: usize,
+    /// Consecutive raw positive frames required to confirm one onset.
+    pub onset_frames: usize,
+    /// Longest run of consecutive raw positive decisions.
+    pub longest_voiced_run_frames: usize,
+    /// Length of the most recent run that reached the onset contract. A later
+    /// isolated positive does not overwrite this value.
+    pub latest_confirmed_run_frames: usize,
+    /// One-based index of the last raw positive frame, or `None` if there was
+    /// no positive decision.
+    pub last_voiced_frame: Option<usize>,
+    /// One-based index of the last frame in the most recent confirmed run.
+    pub last_confirmed_speech_frame: Option<usize>,
+    /// Hangover configured for this capture. This is also the policy-defined
+    /// recent-speech window used by the speech-presence guard.
+    pub hangover_frames: usize,
+    /// Number of frames for which a detector probability was available.
+    pub probability_frames: usize,
+    pub mean_voice_probability: Option<f32>,
+    pub max_voice_probability: Option<f32>,
+    pub voice_probability_threshold: Option<f32>,
 }
 
 /// End-of-recording snapshot of a smoothing detector's state. Voiced frames

@@ -20,7 +20,7 @@ use crate::utils::{
 };
 use crate::TranscriptionCoordinator;
 use ferrous_opencc::{config::BuiltinConfig, OpenCC};
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::future::Future;
@@ -30,6 +30,18 @@ use tauri::Manager;
 use tauri::{AppHandle, Emitter};
 
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+fn transcript_shape(transcript: &str) -> (&'static str, usize, usize) {
+    let trimmed = transcript.trim();
+    let chars = trimmed.chars().count();
+    let words = trimmed.split_whitespace().count();
+    let class = match words {
+        0 => "empty",
+        1 => "single_token",
+        _ => "multi_token",
+    };
+    (class, chars, words)
+}
 
 #[derive(Clone, serde::Serialize)]
 struct RecordingErrorEvent {
@@ -810,17 +822,6 @@ impl ShortcutAction for TranscribeAction {
             });
             let evidence = captured.evidence;
             let samples = captured.samples;
-            debug!(
-                "Recording stopped in {:?}: raw={}ms output_samples={} vad={}/{} onsets={} errors={}",
-                stop_recording_time.elapsed(),
-                evidence.raw_duration_ms,
-                evidence.output_sample_count,
-                evidence.vad_voiced_frames,
-                evidence.vad_analyzed_frames,
-                evidence.vad_confirmed_speech_onsets,
-                evidence.vad_error_frames,
-            );
-
             if rm.was_cancelled_since(cancel_generation) {
                 debug!("Transcription operation cancelled after recording stop");
                 tm.cancel_stream();
@@ -829,9 +830,49 @@ impl ShortcutAction for TranscribeAction {
                 return;
             }
 
+            let backend = settings.transcription_backend;
             let speech_presence = pre_stt_verdict(&evidence);
-            debug!("Pre-STT speech-presence verdict: {speech_presence:?}");
+            info!(
+                "speech_guard_capture backend={backend:?} model_id={:?} stop_elapsed_ms={} raw_duration_ms={} raw_sample_count={} raw_sample_rate_hz={} output_sample_count={} rms_amplitude={:.8} peak_amplitude={:.8} crest_factor={:.4} vad_analyzed_frames={} vad_voiced_frames={} vad_voiced_duration_ms={} vad_voiced_ratio={:.6} vad_required_density={:?} vad_confirmed_speech_onsets={} vad_onset_frames={} vad_longest_voiced_run_frames={} vad_longest_voiced_run_ms={} vad_latest_confirmed_run_frames={} vad_latest_confirmed_run_ms={} vad_last_voiced_frame={:?} vad_frames_since_last_voice={:?} vad_last_confirmed_speech_frame={:?} vad_frames_since_last_confirmed_speech={:?} vad_hangover_frames={} vad_recent_confirmed_tail={} vad_sustained_density={} vad_error_frames={} vad_probability_frames={} vad_mean_probability={:?} vad_max_probability={:?} vad_probability_threshold={:?} pre_stt={:?}",
+                settings.selected_model,
+                stop_recording_time.elapsed().as_millis(),
+                evidence.raw_duration_ms,
+                evidence.raw_sample_count,
+                evidence.raw_sample_rate_hz,
+                evidence.output_sample_count,
+                evidence.rms_amplitude,
+                evidence.peak_amplitude,
+                evidence.crest_factor(),
+                evidence.vad_analyzed_frames,
+                evidence.vad_voiced_frames,
+                evidence.vad_voiced_frames.saturating_mul(30),
+                evidence.vad_voiced_ratio(),
+                evidence.vad_required_density(),
+                evidence.vad_confirmed_speech_onsets,
+                evidence.vad_onset_frames,
+                evidence.vad_longest_voiced_run_frames,
+                evidence.vad_longest_voiced_run_frames.saturating_mul(30),
+                evidence.vad_latest_confirmed_run_frames,
+                evidence.vad_latest_confirmed_run_frames.saturating_mul(30),
+                evidence.vad_last_voiced_frame,
+                evidence.vad_frames_since_last_voice(),
+                evidence.vad_last_confirmed_speech_frame,
+                evidence.vad_frames_since_last_confirmed_speech(),
+                evidence.vad_hangover_frames,
+                evidence.vad_has_recent_confirmed_tail(),
+                evidence.vad_has_sustained_density(),
+                evidence.vad_error_frames,
+                evidence.vad_probability_frames,
+                evidence.vad_mean_probability,
+                evidence.vad_max_probability,
+                evidence.vad_probability_threshold,
+                speech_presence,
+            );
             if speech_presence == SpeechPresenceVerdict::NoSpeech || samples.is_empty() {
+                info!(
+                    "speech_guard_final backend={backend:?} model_id={:?} pre_stt={speech_presence:?} post_stt=NotRunPreSttRejected transcript_class=not_run transcript_chars=0 transcript_words=0",
+                    settings.selected_model,
+                );
                 debug!("No meaningful speech detected; skipping provider and persistence");
                 tm.cancel_stream();
                 utils::hide_recording_overlay(&ah);
@@ -839,7 +880,6 @@ impl ShortcutAction for TranscribeAction {
                 return;
             }
 
-            let backend = settings.transcription_backend;
             let transcription_time = Instant::now();
             let transcription_result: Result<String, String> = match backend {
                 TranscriptionBackend::Local => match tm.finalize_stream_with_settings(&settings) {
@@ -932,19 +972,32 @@ impl ShortcutAction for TranscribeAction {
 
             match transcription_result {
                 Ok(transcription) => {
+                    let (transcript_class, transcript_chars, transcript_words) =
+                        transcript_shape(&transcription);
                     debug!(
-                        "Transcription completed in {:?}: '{}'",
+                        "Transcription completed in {:?}: class={} chars={} words={}",
                         transcription_time.elapsed(),
-                        utils::redact_text(&transcription)
+                        transcript_class,
+                        transcript_chars,
+                        transcript_words,
                     );
 
-                    if post_stt_verdict(
+                    let post_stt = post_stt_verdict(
                         speech_presence,
                         &evidence,
                         &transcription,
+                        // transcribe-cpp 0.2 exposes family-specific token
+                        // probability hints, but no calibrated Whisper
+                        // no-speech probability through this safe result path.
+                        // Do not invent a cross-provider confidence aggregate
+                        // before physical calibration establishes its meaning.
                         PostSttEvidence::default(),
-                    ) == TranscriptVerdict::RejectLikelyHallucination
-                    {
+                    );
+                    info!(
+                        "speech_guard_final backend={backend:?} model_id={:?} pre_stt={speech_presence:?} post_stt={post_stt:?} transcript_class={transcript_class} transcript_chars={transcript_chars} transcript_words={transcript_words}",
+                        settings.selected_model,
+                    );
+                    if post_stt == TranscriptVerdict::RejectLikelyHallucination {
                         debug!("Post-STT guard rejected a likely no-speech hallucination");
                         utils::hide_recording_overlay(&ah);
                         set_tray_state(&ah, TrayIconState::Idle);
@@ -1076,6 +1129,10 @@ impl ShortcutAction for TranscribeAction {
                     }
                 }
                 Err(error) => {
+                    info!(
+                        "speech_guard_final backend={backend:?} model_id={:?} pre_stt={speech_presence:?} post_stt=NotRunProviderError transcript_class=not_available transcript_chars=0 transcript_words=0",
+                        settings.selected_model,
+                    );
                     if rm.was_cancelled_since(cancel_generation) {
                         debug!("Transcription operation cancelled after provider error");
                         utils::hide_recording_overlay(&ah);
@@ -1167,7 +1224,7 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 mod tests {
     use super::{
         complete_unless_cancelled, is_blank_transcription, should_use_streaming_overlay,
-        streaming_capture_plan, strip_think_block,
+        streaming_capture_plan, strip_think_block, transcript_shape,
     };
     use crate::audio_toolkit::VadPolicy;
     use crate::settings::OverlayStyle;
@@ -1188,6 +1245,16 @@ mod tests {
     fn non_blank_transcription_is_kept() {
         assert!(!is_blank_transcription("hello"));
         assert!(!is_blank_transcription("  hello  "));
+    }
+
+    #[test]
+    fn transcript_diagnostics_expose_shape_without_content() {
+        assert_eq!(transcript_shape("  "), ("empty", 0, 0));
+        assert_eq!(transcript_shape("감사합니다."), ("single_token", 6, 1));
+        assert_eq!(
+            transcript_shape("개인 정보는 로그에 쓰지 않습니다."),
+            ("multi_token", 19, 5)
+        );
     }
 
     #[test]
