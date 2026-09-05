@@ -100,6 +100,22 @@ impl CaptureEvidence {
         )
     }
 
+    fn vad_attempted_frames(&self) -> usize {
+        self.vad_analyzed_frames
+            .saturating_add(self.vad_error_frames)
+    }
+
+    fn vad_conservative_frames_since_last_confirmed_speech(&self) -> Option<usize> {
+        self.vad_frames_since_last_confirmed_speech()
+            .map(|frames| frames.saturating_add(self.vad_error_frames))
+    }
+
+    fn vad_capture_fits_within_hangover(&self) -> bool {
+        self.vad_attempted_frames() <= self.vad_hangover_frames
+            && u128::from(self.raw_duration_ms)
+                <= self.vad_hangover_frames as u128 * VAD_FRAME_DURATION_MS as u128
+    }
+
     pub fn crest_factor(&self) -> f32 {
         if self.rms_amplitude <= f32::EPSILON {
             0.0
@@ -108,32 +124,61 @@ impl CaptureEvidence {
         }
     }
 
-    /// Whether the last confirmed raw-VAD run reaches the capture tail. The
-    /// window is the detector's already-configured hangover, not a second
-    /// independently tuned time threshold. The existing two-frame onset stays
-    /// sufficient at the capture tail so quiet acknowledgements are not given
-    /// a new, uncalibrated three-frame requirement.
+    /// Whether the last confirmed raw-VAD run ends inside the detector's base
+    /// hangover window. For a long capture this raw recency signal is not, by
+    /// itself, affirmative speech evidence; see vad_has_recent_sustained_tail.
     pub fn vad_has_recent_confirmed_tail(&self) -> bool {
         if self.vad_onset_frames == 0 || self.vad_hangover_frames == 0 {
             return false;
         }
 
+        // Error frames have no position in the detector report. Assume
+        // conservatively that every error followed the confirmed episode.
         let confirmed_tail_is_recent = self
-            .vad_frames_since_last_confirmed_speech()
+            .vad_conservative_frames_since_last_confirmed_speech()
             .is_some_and(|frames| frames <= self.vad_hangover_frames);
         self.vad_latest_confirmed_run_frames >= self.vad_onset_frames && confirmed_tail_is_recent
     }
 
+    /// Whether the most recent confirmed speech episode is both sustained and
+    /// close enough to the stop action to remain affirmative independent of
+    /// whole-capture density.
+    ///
+    /// Physical Windows F1 captures established the provisional margins: the
+    /// latest run must be at least twice the onset contract (and never fewer
+    /// than four frames), and its last confirmed frame may precede stop by at
+    /// most three configured hangover windows, capped at 45 frames (1.35 s).
+    pub fn vad_has_recent_sustained_tail(&self) -> bool {
+        if self.vad_onset_frames == 0 || self.vad_hangover_frames == 0 {
+            return false;
+        }
+
+        let required_run_frames = self.vad_onset_frames.saturating_mul(2).max(4);
+        let allowed_gap_frames = self
+            .vad_hangover_frames
+            .saturating_mul(3)
+            .min(MAX_RECENT_SUSTAINED_GAP_FRAMES);
+        // Error frames have no position in the detector report. Assume
+        // conservatively that every error followed the confirmed episode.
+        let sustained_tail_is_recent = self
+            .vad_conservative_frames_since_last_confirmed_speech()
+            .is_some_and(|frames| frames <= allowed_gap_frames);
+
+        self.vad_latest_confirmed_run_frames >= required_run_frames && sustained_tail_is_recent
+    }
+
     /// Minimum whole-capture voiced density used for stale speech evidence.
     /// This is derived from the active VAD onset/hangover contract: at least
-    /// `onset_frames / hangover_frames` of analyzed frames must be raw-positive.
+    /// `onset_frames / hangover_frames` of attempted frames must be raw-positive. Detector errors remain
+    /// unknown rather than being counted as voice.
     pub fn vad_required_density(&self) -> Option<f32> {
         (self.vad_hangover_frames > 0 && self.vad_onset_frames > 0)
             .then(|| self.vad_onset_frames as f32 / self.vad_hangover_frames as f32)
     }
 
     pub fn vad_has_sustained_density(&self) -> bool {
-        if self.vad_analyzed_frames == 0
+        let attempted_frames = self.vad_attempted_frames();
+        if attempted_frames == 0
             || self.vad_onset_frames == 0
             || self.vad_hangover_frames == 0
             || self.vad_longest_voiced_run_frames <= self.vad_onset_frames
@@ -142,7 +187,7 @@ impl CaptureEvidence {
         }
 
         (self.vad_voiced_frames as u128 * self.vad_hangover_frames as u128)
-            >= (self.vad_analyzed_frames as u128 * self.vad_onset_frames as u128)
+            >= (attempted_frames as u128 * self.vad_onset_frames as u128)
     }
 }
 
@@ -210,12 +255,14 @@ pub enum TranscriptVerdict {
 
 // Calibration notes:
 // - Handy/Silero works on 30 ms frames. Two positive frames (60 ms) remain the
-//   capture onset contract. A confirmed onset is no longer permanent proof for
-//   the whole recording: an onset remains affirmative while it is inside the
-//   existing tail window. Once stale, it needs both a run beyond the bare
-//   onset and enough whole-capture voiced density. "Recent" and the density
-//   floor reuse the session's existing VAD onset/hangover contract rather than
-//   introducing an independently guessed time or ratio threshold.
+//   capture onset contract and stay affirmative when the entire short capture
+//   fits inside one configured hangover window. A long capture instead needs a
+//   recent sustained episode: at least max(onset * 2, 4) raw-positive frames,
+//   ending within three hangover windows and never more than 45 frames later.
+//   Physical Windows evidence placed real
+//   late speech at 9 frames/25-frame gap and 26 frames/36-frame gap, separated
+//   from the known bare two-frame false onset. Whole-capture density remains a
+//   secondary rescue for older, capture-dense speech, not a late-speech gate.
 // - PCM thresholds are dBFS-derived, not visualizer values.  0.006 RMS is
 //   about -44.4 dBFS and separates the deterministic room/fan calibration
 //   fixtures from deliberately quiet speech fixtures.  Energy alone never
@@ -225,6 +272,8 @@ pub enum TranscriptVerdict {
 // - A crest factor of 18 (~25 dB peak over RMS), together with zero successful
 //   VAD voice decisions, identifies sparse keyboard/mouse impulses.  Crest
 //   factor alone is never enough to reject captured speech.
+const VAD_FRAME_DURATION_MS: u64 = 30;
+const MAX_RECENT_SUSTAINED_GAP_FRAMES: usize = 45;
 const MIN_MEANINGFUL_CAPTURE_MS: u64 = 45;
 const MIN_RELIABLE_VAD_FRAMES: usize = 3;
 const ELECTRICAL_SILENCE_RMS: f32 = 0.000_032;
@@ -237,7 +286,12 @@ fn has_affirmative_confirmed_speech(evidence: &CaptureEvidence) -> bool {
         return false;
     }
 
-    evidence.vad_has_recent_confirmed_tail() || evidence.vad_has_sustained_density()
+    let short_capture_recent_tail =
+        evidence.vad_capture_fits_within_hangover() && evidence.vad_has_recent_confirmed_tail();
+
+    short_capture_recent_tail
+        || evidence.vad_has_recent_sustained_tail()
+        || evidence.vad_has_sustained_density()
 }
 
 /// Pure pre-provider speech-presence decision.
@@ -458,6 +512,51 @@ mod tests {
         }
     }
 
+    fn physical_windows_episode_evidence(
+        raw_duration_ms: u64,
+        analyzed_frames: usize,
+        voiced_frames: usize,
+        latest_run_frames: usize,
+        confirmed_gap_frames: usize,
+        rms_amplitude: f32,
+        mean_probability: f32,
+        max_probability: f32,
+    ) -> CaptureEvidence {
+        let raw_sample_count = ((u128::from(raw_duration_ms) * u128::from(RATE)) / 1_000)
+            .min(usize::MAX as u128) as usize;
+        let last_confirmed_frame = analyzed_frames
+            .checked_sub(confirmed_gap_frames)
+            .filter(|frame| *frame > 0);
+
+        CaptureEvidence {
+            // The physical log does not expose sample count or peak. Keep those
+            // fields neutral and internally consistent; every reported guard
+            // decision field below is copied exactly.
+            raw_sample_count,
+            raw_sample_rate_hz: RATE,
+            raw_duration_ms,
+            peak_amplitude: rms_amplitude.max(0.01),
+            rms_amplitude,
+            exact_zero_samples: 0,
+            non_finite_samples: 0,
+            output_sample_count: raw_sample_count,
+            vad_analyzed_frames: analyzed_frames,
+            vad_voiced_frames: voiced_frames,
+            vad_confirmed_speech_onsets: usize::from(latest_run_frames >= 2),
+            vad_onset_frames: 2,
+            vad_longest_voiced_run_frames: latest_run_frames,
+            vad_latest_confirmed_run_frames: latest_run_frames,
+            vad_last_voiced_frame: last_confirmed_frame,
+            vad_last_confirmed_speech_frame: last_confirmed_frame,
+            vad_hangover_frames: 15,
+            vad_probability_frames: analyzed_frames,
+            vad_mean_probability: Some(mean_probability),
+            vad_max_probability: Some(max_probability),
+            vad_probability_threshold: Some(0.3),
+            vad_error_frames: 0,
+        }
+    }
+
     fn sine(duration_ms: usize, amplitude: f32, frequency_hz: f32) -> Vec<f32> {
         let len = RATE as usize * duration_ms / 1_000;
         (0..len)
@@ -515,7 +614,7 @@ mod tests {
 
     #[test]
     fn two_frame_short_korean_utterances_are_preserved() {
-        for transcript in ["네", "응", "아니", "오케이"] {
+        for transcript in ["네", "응", "아니", "오케이", "테스트입니다"] {
             let samples = sine(60, 0.035, 190.0);
             let evidence = evidence_from_signal(&samples, 2, 2, 0, samples.len());
             assert_eq!(
@@ -533,6 +632,97 @@ mod tests {
                 TranscriptVerdict::Accept
             );
         }
+    }
+
+    #[test]
+    fn physical_windows_late_speech_episodes_are_accepted() {
+        let fixtures = [
+            (
+                "B",
+                18_163,
+                606,
+                9,
+                25,
+                0.005_405_51,
+                0.038_343_344,
+                0.942_428_8,
+                "네",
+            ),
+            (
+                "C",
+                19_870,
+                663,
+                26,
+                36,
+                0.008_565_85,
+                0.054_817_446,
+                0.996_423_3,
+                "테스트입니다",
+            ),
+        ];
+
+        for (case, duration_ms, analyzed, run, gap, rms, mean, max, transcript) in fixtures {
+            let evidence = physical_windows_episode_evidence(
+                duration_ms,
+                analyzed,
+                run,
+                run,
+                gap,
+                rms,
+                mean,
+                max,
+            );
+
+            assert_eq!(
+                evidence.vad_frames_since_last_confirmed_speech(),
+                Some(gap),
+                "physical case {case} gap"
+            );
+            assert!(
+                !evidence.vad_has_recent_confirmed_tail(),
+                "physical case {case} exceeds the base hangover"
+            );
+            assert!(
+                !evidence.vad_has_sustained_density(),
+                "physical case {case} must not depend on whole-capture density"
+            );
+            assert!(
+                evidence.vad_has_recent_sustained_tail(),
+                "physical case {case} has a recent sustained episode"
+            );
+
+            let pre = pre_stt_verdict(&evidence);
+            assert_eq!(pre, SpeechPresenceVerdict::Speech, "physical case {case}");
+            assert_eq!(
+                post_stt_verdict(pre, &evidence, transcript, PostSttEvidence::default()),
+                TranscriptVerdict::Accept,
+                "physical case {case}: {transcript}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_capture_bare_two_frame_episode_with_physical_gap_is_rejected() {
+        let evidence = physical_windows_episode_evidence(
+            18_163,
+            606,
+            2,
+            2,
+            25,
+            0.005_405_51,
+            0.038_343_344,
+            0.942_428_8,
+        );
+
+        assert!(!evidence.vad_has_recent_confirmed_tail());
+        assert!(!evidence.vad_has_recent_sustained_tail());
+        assert!(!evidence.vad_has_sustained_density());
+        let pre = pre_stt_verdict(&evidence);
+        assert_eq!(pre, SpeechPresenceVerdict::Borderline);
+        assert_eq!(
+            post_stt_verdict(pre, &evidence, "네", PostSttEvidence::default()),
+            TranscriptVerdict::RejectLikelyHallucination
+        );
     }
 
     #[test]
@@ -557,6 +747,7 @@ mod tests {
             evidence.vad_last_voiced_frame = Some(2);
             evidence.vad_last_confirmed_speech_frame = Some(2);
 
+            assert!(!evidence.vad_has_recent_sustained_tail());
             let pre = pre_stt_verdict(&evidence);
             assert_eq!(
                 pre,
@@ -574,25 +765,108 @@ mod tests {
     }
 
     #[test]
-    fn recent_two_frame_tail_preserves_short_korean_after_long_silence() {
+    fn bare_two_frame_tail_does_not_bless_a_long_capture() {
         for duration_ms in [5_000, 15_000, 30_000] {
             for transcript in ["네", "응", "아니", "오케이", "테스트입니다"] {
                 let samples = deterministic_noise(duration_ms, 0.012);
                 let analyzed = samples.len() / 480;
                 let evidence = evidence_from_signal(&samples, analyzed, 2, 0, samples.len());
+
+                assert!(evidence.vad_has_recent_confirmed_tail());
+                assert!(!evidence.vad_has_recent_sustained_tail());
+                assert!(!evidence.vad_has_sustained_density());
                 let pre = pre_stt_verdict(&evidence);
                 assert_eq!(
                     pre,
-                    SpeechPresenceVerdict::Speech,
-                    "{duration_ms} ms recent short utterance {transcript}"
+                    SpeechPresenceVerdict::Borderline,
+                    "{duration_ms} ms bare tail onset {transcript}"
                 );
                 assert_eq!(
                     post_stt_verdict(pre, &evidence, transcript, PostSttEvidence::default()),
-                    TranscriptVerdict::Accept,
-                    "{duration_ms} ms recent short utterance {transcript}"
+                    TranscriptVerdict::RejectLikelyHallucination,
+                    "{duration_ms} ms bare tail onset {transcript}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn sustained_episode_several_seconds_before_stop_is_not_automatic_speech() {
+        let evidence = physical_windows_episode_evidence(
+            18_163,
+            606,
+            9,
+            9,
+            120,
+            0.005_405_51,
+            0.038_343_344,
+            0.942_428_8,
+        );
+
+        assert!(!evidence.vad_has_recent_confirmed_tail());
+        assert!(!evidence.vad_has_recent_sustained_tail());
+        assert!(!evidence.vad_has_sustained_density());
+        let pre = pre_stt_verdict(&evidence);
+        assert_eq!(pre, SpeechPresenceVerdict::Borderline);
+        assert_eq!(
+            post_stt_verdict(pre, &evidence, "네", PostSttEvidence::default()),
+            TranscriptVerdict::RejectLikelyHallucination
+        );
+    }
+
+    #[test]
+    fn trailing_vad_errors_cannot_keep_an_episode_recent_or_dense() {
+        let mut evidence = physical_windows_episode_evidence(
+            18_163,
+            9,
+            9,
+            9,
+            0,
+            0.005_405_51,
+            0.038_343_344,
+            0.942_428_8,
+        );
+        evidence.vad_error_frames = 597;
+
+        assert_eq!(evidence.vad_frames_since_last_confirmed_speech(), Some(0));
+        assert!(!evidence.vad_has_recent_confirmed_tail());
+        assert!(!evidence.vad_has_recent_sustained_tail());
+        assert!(!evidence.vad_has_sustained_density());
+        let pre = pre_stt_verdict(&evidence);
+        assert_eq!(pre, SpeechPresenceVerdict::Borderline);
+        assert_eq!(
+            post_stt_verdict(pre, &evidence, "네", PostSttEvidence::default()),
+            TranscriptVerdict::RejectLikelyHallucination
+        );
+    }
+
+    #[test]
+    fn recent_sustained_tail_enforces_provisional_run_and_gap_boundaries() {
+        let mut evidence = physical_windows_episode_evidence(
+            18_163,
+            606,
+            4,
+            4,
+            45,
+            0.005_405_51,
+            0.038_343_344,
+            0.942_428_8,
+        );
+        assert!(evidence.vad_has_recent_sustained_tail());
+
+        evidence.vad_latest_confirmed_run_frames = 3;
+        assert!(!evidence.vad_has_recent_sustained_tail());
+
+        evidence.vad_latest_confirmed_run_frames = 4;
+        evidence.vad_last_confirmed_speech_frame = Some(606 - 46);
+        assert!(!evidence.vad_has_recent_sustained_tail());
+
+        evidence.vad_hangover_frames = 55;
+        evidence.vad_last_confirmed_speech_frame = Some(606 - 45);
+        assert!(evidence.vad_has_recent_sustained_tail());
+
+        evidence.vad_last_confirmed_speech_frame = Some(606 - 46);
+        assert!(!evidence.vad_has_recent_sustained_tail());
     }
 
     #[test]

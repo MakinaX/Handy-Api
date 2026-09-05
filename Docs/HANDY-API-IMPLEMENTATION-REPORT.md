@@ -85,11 +85,14 @@ before any new signing run or approval is considered. The exact procedure is in
   until the same confirmed Silero onset. Missing/erroring VAD never opens that
   streaming latch.
 - A single confirmed onset is no longer permanent proof for the whole capture.
-  The existing two-frame onset remains affirmative in the configured tail
-  window so a delayed short utterance does not acquire an uncalibrated
-  three-frame threshold. Once stale, an onset requires both a run beyond the
-  bare onset and whole-capture density derived from the existing
-  onset/hangover contract; a lone old two-frame onset becomes Borderline.
+  The existing two-frame onset remains affirmative when the whole short capture
+  fits in one configured hangover window. A long capture instead accepts a
+  recent sustained episode of at least max(onset \* 2, 4) frames ending within
+  three hangover windows, capped at 45 frames, independent of whole-capture
+  density. VAD errors are treated conservatively as potentially trailing for
+  recency and cannot count as voiced density. Older speech may still use the
+  existing sustained-density rescue; a bare two-frame onset in a long capture
+  becomes Borderline even when it is stop-adjacent.
 - Stage C recomputes the same durable-capture condition and rejects Local
   Borderline output because Local currently supplies no positive post-STT
   metadata. The physical failure phrases were not added to the lexical pattern

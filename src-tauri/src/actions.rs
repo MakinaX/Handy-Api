@@ -833,7 +833,7 @@ impl ShortcutAction for TranscribeAction {
             let backend = settings.transcription_backend;
             let speech_presence = pre_stt_verdict(&evidence);
             info!(
-                "speech_guard_capture backend={backend:?} model_id={:?} stop_elapsed_ms={} raw_duration_ms={} raw_sample_count={} raw_sample_rate_hz={} output_sample_count={} rms_amplitude={:.8} peak_amplitude={:.8} crest_factor={:.4} vad_analyzed_frames={} vad_voiced_frames={} vad_voiced_duration_ms={} vad_voiced_ratio={:.6} vad_required_density={:?} vad_confirmed_speech_onsets={} vad_onset_frames={} vad_longest_voiced_run_frames={} vad_longest_voiced_run_ms={} vad_latest_confirmed_run_frames={} vad_latest_confirmed_run_ms={} vad_last_voiced_frame={:?} vad_frames_since_last_voice={:?} vad_last_confirmed_speech_frame={:?} vad_frames_since_last_confirmed_speech={:?} vad_hangover_frames={} vad_recent_confirmed_tail={} vad_sustained_density={} vad_error_frames={} vad_probability_frames={} vad_mean_probability={:?} vad_max_probability={:?} vad_probability_threshold={:?} pre_stt={:?}",
+                "speech_guard_capture backend={backend:?} model_id={:?} stop_elapsed_ms={} raw_duration_ms={} raw_sample_count={} raw_sample_rate_hz={} output_sample_count={} rms_amplitude={:.8} peak_amplitude={:.8} crest_factor={:.4} vad_analyzed_frames={} vad_voiced_frames={} vad_voiced_duration_ms={} vad_voiced_ratio={:.6} vad_required_density={:?} vad_confirmed_speech_onsets={} vad_onset_frames={} vad_longest_voiced_run_frames={} vad_longest_voiced_run_ms={} vad_latest_confirmed_run_frames={} vad_latest_confirmed_run_ms={} vad_last_voiced_frame={:?} vad_frames_since_last_voice={:?} vad_last_confirmed_speech_frame={:?} vad_frames_since_last_confirmed_speech={:?} vad_hangover_frames={} vad_recent_confirmed_tail={} vad_recent_sustained_tail={} vad_sustained_density={} vad_error_frames={} vad_probability_frames={} vad_mean_probability={:?} vad_max_probability={:?} vad_probability_threshold={:?} pre_stt={:?}",
                 settings.selected_model,
                 stop_recording_time.elapsed().as_millis(),
                 evidence.raw_duration_ms,
@@ -860,6 +860,7 @@ impl ShortcutAction for TranscribeAction {
                 evidence.vad_frames_since_last_confirmed_speech(),
                 evidence.vad_hangover_frames,
                 evidence.vad_has_recent_confirmed_tail(),
+                evidence.vad_has_recent_sustained_tail(),
                 evidence.vad_has_sustained_density(),
                 evidence.vad_error_frames,
                 evidence.vad_probability_frames,
