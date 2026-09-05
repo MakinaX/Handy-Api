@@ -28,6 +28,7 @@ const UPLOAD_IDLE: u8 = 0;
 const UPLOAD_READY: u8 = 1;
 const UPLOAD_STARTED: u8 = 2;
 const UPLOAD_CANCELLED: u8 = 3;
+const FALLBACK_UPLOAD_STARTED: u8 = 4;
 
 fn cancel_pending_side_effect(state: &AtomicU8) -> bool {
     state
@@ -106,14 +107,26 @@ fn claim_pending_paste(state: &AtomicU8) -> bool {
 }
 
 fn cancel_pending_upload(state: &AtomicU8) -> bool {
-    state
-        .compare_exchange(
-            UPLOAD_READY,
-            UPLOAD_CANCELLED,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        )
-        .is_ok()
+    loop {
+        let current = state.load(Ordering::Acquire);
+        if !matches!(
+            current,
+            UPLOAD_READY | UPLOAD_STARTED | FALLBACK_UPLOAD_STARTED
+        ) {
+            return false;
+        }
+        if state
+            .compare_exchange(
+                current,
+                UPLOAD_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return true;
+        }
+    }
 }
 
 fn claim_pending_upload(state: &AtomicU8) -> bool {
@@ -121,6 +134,17 @@ fn claim_pending_upload(state: &AtomicU8) -> bool {
         .compare_exchange(
             UPLOAD_READY,
             UPLOAD_STARTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+fn claim_fallback_upload(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            UPLOAD_STARTED,
+            FALLBACK_UPLOAD_STARTED,
             Ordering::AcqRel,
             Ordering::Acquire,
         )
@@ -508,9 +532,10 @@ pub struct AudioRecordingManager {
     /// when no operation is pending; once armed, Escape wins while Pending,
     /// while a PasteCommitted result is no longer cancellable.
     side_effect_state: Arc<AtomicU8>,
-    /// Atomic admission point shared by Gemini upload and ESC. Whichever CAS
-    /// wins defines cancelled-before-send versus in-flight-then-aborted; this
-    /// removes the unavoidable check-then-network race of a generation read.
+    /// Atomic admission point shared by Gemini uploads and ESC. The same state
+    /// admits the primary upload and, at most once, its empty-result fallback.
+    /// Whichever CAS wins defines cancelled-before-send versus
+    /// in-flight-then-aborted without a check-then-network race.
     upload_state: Arc<AtomicU8>,
 }
 
@@ -1115,6 +1140,16 @@ impl AudioRecordingManager {
         claim_pending_upload(&self.upload_state)
     }
 
+    /// Atomically admit the one permitted Gemini empty-transcript fallback.
+    /// This can succeed only after this operation admitted its primary upload,
+    /// and it competes with ESC on the same state machine.
+    pub fn try_claim_fallback_upload_start(&self, cancel_generation: u64) -> bool {
+        if self.was_cancelled_since(cancel_generation) {
+            return false;
+        }
+        claim_fallback_upload(&self.upload_state)
+    }
+
     /// Reserve the local engine for a switch, unload, or active-model deletion.
     /// This is mutually exclusive with `arm_operation`, including the recording
     /// and provider-pending phases where `is_recording()` alone is already false.
@@ -1234,9 +1269,9 @@ impl AudioRecordingManager {
     /// Cancel any ongoing recording without returning audio samples
     pub fn cancel_recording(&self) {
         self.invalidate_recording_readiness();
-        // Upload admission and ESC compete on this CAS first. If upload already
-        // won, generation cancellation below drops/suppresses the in-flight
-        // future; if ESC wins, the request future is never polled.
+        // Upload admission and ESC compete on this state first. Cancellation
+        // marks either the primary or fallback request as logically aborted;
+        // if ESC wins before admission, that request future is never polled.
         cancel_pending_upload(&self.upload_state);
         // Cancellation and paste compete on one atomic state. If paste has
         // already committed, cancellation is too late and must not invalidate
@@ -1279,10 +1314,11 @@ impl AudioRecordingManager {
 mod side_effect_tests {
     use super::{
         cancel_pending_side_effect, cancel_pending_upload, claim_engine_mutation,
-        claim_pending_operation, claim_pending_paste, claim_pending_upload,
-        finish_pending_operation, release_engine_mutation, SIDE_EFFECT_CANCELLED,
-        SIDE_EFFECT_ENGINE_MUTATING, SIDE_EFFECT_IDLE, SIDE_EFFECT_PASTE_COMMITTED,
-        SIDE_EFFECT_PENDING, UPLOAD_CANCELLED, UPLOAD_READY, UPLOAD_STARTED,
+        claim_fallback_upload, claim_pending_operation, claim_pending_paste, claim_pending_upload,
+        finish_pending_operation, release_engine_mutation, FALLBACK_UPLOAD_STARTED,
+        SIDE_EFFECT_CANCELLED, SIDE_EFFECT_ENGINE_MUTATING, SIDE_EFFECT_IDLE,
+        SIDE_EFFECT_PASTE_COMMITTED, SIDE_EFFECT_PENDING, UPLOAD_CANCELLED, UPLOAD_READY,
+        UPLOAD_STARTED,
     };
     use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -1311,11 +1347,57 @@ mod side_effect_tests {
     }
 
     #[test]
-    fn admitted_upload_is_in_flight_for_late_escape() {
+    fn late_escape_marks_admitted_primary_as_cancelled() {
         let state = AtomicU8::new(UPLOAD_READY);
         assert!(claim_pending_upload(&state));
-        assert!(!cancel_pending_upload(&state));
+        assert!(cancel_pending_upload(&state));
+        assert_eq!(state.load(Ordering::Acquire), UPLOAD_CANCELLED);
+    }
+
+    #[test]
+    fn fallback_can_be_admitted_exactly_once_after_primary() {
+        let state = AtomicU8::new(UPLOAD_READY);
+        assert!(claim_pending_upload(&state));
         assert_eq!(state.load(Ordering::Acquire), UPLOAD_STARTED);
+        assert!(claim_fallback_upload(&state));
+        assert!(!claim_fallback_upload(&state));
+        assert_eq!(state.load(Ordering::Acquire), FALLBACK_UPLOAD_STARTED);
+    }
+
+    #[test]
+    fn escape_before_fallback_admission_prevents_fallback() {
+        let state = AtomicU8::new(UPLOAD_READY);
+        assert!(claim_pending_upload(&state));
+        assert!(cancel_pending_upload(&state));
+        assert!(!claim_fallback_upload(&state));
+        assert_eq!(state.load(Ordering::Acquire), UPLOAD_CANCELLED);
+    }
+
+    #[test]
+    fn late_escape_marks_admitted_fallback_as_cancelled() {
+        let state = AtomicU8::new(UPLOAD_READY);
+        assert!(claim_pending_upload(&state));
+        assert!(claim_fallback_upload(&state));
+        assert!(cancel_pending_upload(&state));
+        assert_eq!(state.load(Ordering::Acquire), UPLOAD_CANCELLED);
+    }
+
+    #[test]
+    fn escape_during_fallback_blocks_the_paste_commit() {
+        let upload_state = AtomicU8::new(UPLOAD_READY);
+        let side_effect_state = AtomicU8::new(SIDE_EFFECT_PENDING);
+        assert!(claim_pending_upload(&upload_state));
+        assert!(claim_fallback_upload(&upload_state));
+
+        assert!(cancel_pending_upload(&upload_state));
+        assert!(cancel_pending_side_effect(&side_effect_state));
+
+        assert!(!claim_pending_paste(&side_effect_state));
+        assert_eq!(upload_state.load(Ordering::Acquire), UPLOAD_CANCELLED);
+        assert_eq!(
+            side_effect_state.load(Ordering::Acquire),
+            SIDE_EFFECT_CANCELLED
+        );
     }
 
     #[test]

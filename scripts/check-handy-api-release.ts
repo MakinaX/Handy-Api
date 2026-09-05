@@ -663,6 +663,12 @@ expect(
   "Gemini adapter model binding drifted",
 );
 expect(
+  gemini.includes(
+    'pub const GEMINI_EMPTY_TRANSCRIPT_FALLBACK_MODEL: &str = "gemini-3.5-flash-lite";',
+  ),
+  "Gemini empty-transcript fallback model binding drifted",
+);
+expect(
   gemini.includes("inlineData") && gemini.includes("customVocabulary"),
   "Gemini adapter lost audio or custom-vocabulary request fields",
 );
@@ -685,10 +691,58 @@ expect(
 );
 expect(
   actions.includes("TranscriptionBackend::Gemini") &&
+    actions.includes("transcribe_with_gemini_empty_failover(") &&
     actions.includes("pre_stt_verdict(&evidence)") &&
     actions.includes("post_stt_verdict(") &&
     actions.includes("complete_unless_cancelled("),
   "Gemini pipeline is not guarded by speech evidence and cancellation",
+);
+expect(
+  gemini.includes("prepare_empty_transcript_fallback(") &&
+    gemini.includes("Return transcript text only.") &&
+    actions.includes("speech_presence != SpeechPresenceVerdict::Speech") &&
+    actions.includes("!primary_transcript.trim().is_empty()") &&
+    actions.includes("try_claim_fallback_upload_start"),
+  "Gemini fallback is not restricted to Speech plus a successful empty primary",
+);
+
+const geminiCancelledOutcome = actions.indexOf(
+  "GeminiTranscriptionOutcome::Cancelled =>",
+);
+const geminiCommonResultHandling = actions.indexOf(
+  "match transcription_result {",
+  geminiCancelledOutcome,
+);
+expect(
+  geminiCancelledOutcome >= 0 &&
+    geminiCommonResultHandling > geminiCancelledOutcome &&
+    actions
+      .slice(geminiCancelledOutcome, geminiCommonResultHandling)
+      .includes("return;"),
+  "Cancelled Gemini work can reach common output handling",
+);
+
+const guardedOutputAdmission = actions.indexOf(
+  "if !post_stt_allows_output(post_stt)",
+);
+const guardedWavSave = actions.indexOf(
+  "let wav_saved = save_verified_recording",
+  guardedOutputAdmission,
+);
+const guardedPasteCommit = actions.indexOf(
+  "if !rm_for_paste.try_claim_paste",
+  guardedOutputAdmission,
+);
+const guardedHistoryCommit = actions.indexOf(
+  "hm_for_paste.save_entry(",
+  guardedOutputAdmission,
+);
+expect(
+  guardedOutputAdmission >= 0 &&
+    guardedWavSave > guardedOutputAdmission &&
+    guardedPasteCommit > guardedWavSave &&
+    guardedHistoryCommit > guardedPasteCommit,
+  "Post-STT rejection no longer precedes WAV, paste, and history side effects",
 );
 expect(
   cli.includes('#[command(name = "handy-api"') &&

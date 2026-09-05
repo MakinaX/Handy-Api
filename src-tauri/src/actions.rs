@@ -43,6 +43,10 @@ fn transcript_shape(transcript: &str) -> (&'static str, usize, usize) {
     (class, chars, words)
 }
 
+fn post_stt_allows_output(verdict: TranscriptVerdict) -> bool {
+    verdict == TranscriptVerdict::Accept
+}
+
 #[derive(Clone, serde::Serialize)]
 struct RecordingErrorEvent {
     error_type: String,
@@ -135,6 +139,197 @@ where
         {
             return Some(result);
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GeminiFallbackResult {
+    Success,
+    Empty,
+    Error,
+}
+
+impl GeminiFallbackResult {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Empty => "empty",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GeminiFailoverDiagnostics {
+    primary_latency_ms: u128,
+    fallback_latency_ms: u128,
+    fallback_result: GeminiFallbackResult,
+    fallback_chars: usize,
+    fallback_words: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GeminiTranscriptionOutcome {
+    NotRunNoSpeech,
+    Cancelled,
+    Completed {
+        result: Result<String, String>,
+        failover: Option<GeminiFailoverDiagnostics>,
+    },
+}
+
+fn gemini_failover_diagnostic_line(diagnostics: GeminiFailoverDiagnostics) -> String {
+    format!(
+        "gemini_empty_transcript_failover primary_model={} primary_result=empty primary_latency_ms={} primary_chars=0 primary_words=0 fallback_model={} fallback_result={} fallback_latency_ms={} fallback_chars={} fallback_words={}",
+        crate::gemini::GEMINI_TRANSCRIBE_MODEL,
+        diagnostics.primary_latency_ms,
+        crate::gemini::GEMINI_EMPTY_TRANSCRIPT_FALLBACK_MODEL,
+        diagnostics.fallback_result.as_str(),
+        diagnostics.fallback_latency_ms,
+        diagnostics.fallback_chars,
+        diagnostics.fallback_words,
+    )
+}
+
+/// Run the Gemini provider transaction with exactly one narrowly admitted
+/// empty-result fallback. Request preparation remains separate from request
+/// polling so ESC can win after synchronous WAV/base64 work without starting
+/// network I/O.
+async fn transcribe_with_gemini_empty_failover<
+    PrimaryPrepared,
+    FallbackPrepared,
+    PreparePrimary,
+    PrepareFallback,
+    SendPrimary,
+    SendFallback,
+    PrimaryFuture,
+    FallbackFuture,
+    IsCancelled,
+    ClaimPrimary,
+    ClaimFallback,
+>(
+    speech_presence: SpeechPresenceVerdict,
+    prepare_primary: PreparePrimary,
+    send_primary: SendPrimary,
+    prepare_fallback: PrepareFallback,
+    send_fallback: SendFallback,
+    is_cancelled: IsCancelled,
+    claim_primary: ClaimPrimary,
+    claim_fallback: ClaimFallback,
+) -> GeminiTranscriptionOutcome
+where
+    PreparePrimary: FnOnce() -> Result<PrimaryPrepared, String>,
+    PrepareFallback: FnOnce() -> Result<FallbackPrepared, String>,
+    SendPrimary: FnOnce(PrimaryPrepared) -> PrimaryFuture,
+    SendFallback: FnOnce(FallbackPrepared) -> FallbackFuture,
+    PrimaryFuture: Future<Output = Result<String, String>>,
+    FallbackFuture: Future<Output = Result<String, String>>,
+    IsCancelled: Fn() -> bool,
+    ClaimPrimary: FnOnce() -> bool,
+    ClaimFallback: FnOnce() -> bool,
+{
+    if speech_presence == SpeechPresenceVerdict::NoSpeech {
+        return GeminiTranscriptionOutcome::NotRunNoSpeech;
+    }
+    if is_cancelled() {
+        return GeminiTranscriptionOutcome::Cancelled;
+    }
+
+    let primary_request = match prepare_primary() {
+        Ok(request) => request,
+        Err(error) => {
+            return GeminiTranscriptionOutcome::Completed {
+                result: Err(error),
+                failover: None,
+            };
+        }
+    };
+    if is_cancelled() || !claim_primary() {
+        return GeminiTranscriptionOutcome::Cancelled;
+    }
+
+    let primary_started = Instant::now();
+    let Some(primary_result) =
+        complete_unless_cancelled(send_primary(primary_request), || is_cancelled()).await
+    else {
+        return GeminiTranscriptionOutcome::Cancelled;
+    };
+    let primary_latency_ms = primary_started.elapsed().as_millis();
+    if is_cancelled() {
+        return GeminiTranscriptionOutcome::Cancelled;
+    }
+
+    let primary_transcript = match primary_result {
+        Ok(transcript) => transcript,
+        Err(error) => {
+            return GeminiTranscriptionOutcome::Completed {
+                result: Err(error),
+                failover: None,
+            };
+        }
+    };
+    if speech_presence != SpeechPresenceVerdict::Speech || !primary_transcript.trim().is_empty() {
+        return GeminiTranscriptionOutcome::Completed {
+            result: Ok(primary_transcript),
+            failover: None,
+        };
+    }
+
+    if is_cancelled() {
+        return GeminiTranscriptionOutcome::Cancelled;
+    }
+    let fallback_request = match prepare_fallback() {
+        Ok(request) => request,
+        Err(error) => {
+            return GeminiTranscriptionOutcome::Completed {
+                result: Err(error),
+                failover: Some(GeminiFailoverDiagnostics {
+                    primary_latency_ms,
+                    fallback_latency_ms: 0,
+                    fallback_result: GeminiFallbackResult::Error,
+                    fallback_chars: 0,
+                    fallback_words: 0,
+                }),
+            };
+        }
+    };
+    if is_cancelled() || !claim_fallback() {
+        return GeminiTranscriptionOutcome::Cancelled;
+    }
+
+    let fallback_started = Instant::now();
+    let Some(fallback_result) =
+        complete_unless_cancelled(send_fallback(fallback_request), || is_cancelled()).await
+    else {
+        return GeminiTranscriptionOutcome::Cancelled;
+    };
+    let fallback_latency_ms = fallback_started.elapsed().as_millis();
+    if is_cancelled() {
+        return GeminiTranscriptionOutcome::Cancelled;
+    }
+
+    let (fallback_verdict, fallback_chars, fallback_words) = match &fallback_result {
+        Ok(transcript) => {
+            let (_, chars, words) = transcript_shape(transcript);
+            let verdict = if transcript.trim().is_empty() {
+                GeminiFallbackResult::Empty
+            } else {
+                GeminiFallbackResult::Success
+            };
+            (verdict, chars, words)
+        }
+        Err(_) => (GeminiFallbackResult::Error, 0, 0),
+    };
+
+    GeminiTranscriptionOutcome::Completed {
+        result: fallback_result,
+        failover: Some(GeminiFailoverDiagnostics {
+            primary_latency_ms,
+            fallback_latency_ms,
+            fallback_result: fallback_verdict,
+            fallback_chars,
+            fallback_words,
+        }),
     }
 }
 
@@ -910,53 +1105,65 @@ impl ShortcutAction for TranscribeAction {
 
                     match client {
                         Ok(client) => {
-                            if rm.was_cancelled_since(cancel_generation) {
-                                debug!("Gemini transcription cancelled before request preparation");
-                                utils::hide_recording_overlay(&ah);
-                                set_tray_state(&ah, TrayIconState::Idle);
-                                return;
-                            }
-                            match client.prepare_transcription(
-                                &samples,
-                                settings.gemini_transcription_mode,
-                                &settings.gemini_language,
-                                &settings.custom_words,
-                            ) {
-                                Ok(prepared) => {
-                                    // WAV/base64/JSON preparation is synchronous
-                                    // and can be material for a long capture. An
-                                    // ESC during that work must win before
-                                    // reqwest is ever polled.
-                                    if rm.was_cancelled_since(cancel_generation) {
-                                        debug!("Gemini transcription cancelled before upload");
-                                        utils::hide_recording_overlay(&ah);
-                                        set_tray_state(&ah, TrayIconState::Idle);
-                                        return;
-                                    }
-                                    if !rm.try_claim_upload_start(cancel_generation) {
-                                        debug!(
-                                            "Gemini upload admission lost to cancellation; request not started"
-                                        );
-                                        utils::hide_recording_overlay(&ah);
-                                        set_tray_state(&ah, TrayIconState::Idle);
-                                        return;
-                                    }
-                                    let Some(result) = complete_unless_cancelled(
-                                        client.send_prepared_transcription(prepared),
-                                        || rm.was_cancelled_since(cancel_generation),
-                                    )
-                                    .await
-                                    else {
-                                        debug!(
-                                            "In-flight Gemini request cancelled; result discarded"
-                                        );
-                                        utils::hide_recording_overlay(&ah);
-                                        set_tray_state(&ah, TrayIconState::Idle);
-                                        return;
-                                    };
-                                    result.map_err(|error| error.to_string())
+                            let outcome = transcribe_with_gemini_empty_failover(
+                                speech_presence,
+                                || {
+                                    client
+                                        .prepare_transcription(
+                                            &samples,
+                                            settings.gemini_transcription_mode,
+                                            &settings.gemini_language,
+                                            &settings.custom_words,
+                                        )
+                                        .map_err(|error| error.to_string())
+                                },
+                                |prepared| async {
+                                    client
+                                        .send_prepared_transcription(prepared)
+                                        .await
+                                        .map_err(|error| error.to_string())
+                                },
+                                || {
+                                    client
+                                        .prepare_empty_transcript_fallback(
+                                            &samples,
+                                            settings.gemini_transcription_mode,
+                                            &settings.gemini_language,
+                                            &settings.custom_words,
+                                        )
+                                        .map_err(|error| error.to_string())
+                                },
+                                |prepared| async {
+                                    client
+                                        .send_prepared_transcription(prepared)
+                                        .await
+                                        .map_err(|error| error.to_string())
+                                },
+                                || rm.was_cancelled_since(cancel_generation),
+                                || rm.try_claim_upload_start(cancel_generation),
+                                || rm.try_claim_fallback_upload_start(cancel_generation),
+                            )
+                            .await;
+
+                            match outcome {
+                                GeminiTranscriptionOutcome::NotRunNoSpeech => {
+                                    debug!("Gemini request skipped because speech was absent");
+                                    utils::hide_recording_overlay(&ah);
+                                    set_tray_state(&ah, TrayIconState::Idle);
+                                    return;
                                 }
-                                Err(error) => Err(error.to_string()),
+                                GeminiTranscriptionOutcome::Cancelled => {
+                                    debug!("Gemini request cancelled; result discarded");
+                                    utils::hide_recording_overlay(&ah);
+                                    set_tray_state(&ah, TrayIconState::Idle);
+                                    return;
+                                }
+                                GeminiTranscriptionOutcome::Completed { result, failover } => {
+                                    if let Some(diagnostics) = failover {
+                                        info!("{}", gemini_failover_diagnostic_line(diagnostics));
+                                    }
+                                    result
+                                }
                             }
                         }
                         Err(error) => Err(error),
@@ -998,7 +1205,7 @@ impl ShortcutAction for TranscribeAction {
                         "speech_guard_final backend={backend:?} model_id={:?} pre_stt={speech_presence:?} post_stt={post_stt:?} transcript_class={transcript_class} transcript_chars={transcript_chars} transcript_words={transcript_words}",
                         settings.selected_model,
                     );
-                    if post_stt == TranscriptVerdict::RejectLikelyHallucination {
+                    if !post_stt_allows_output(post_stt) {
                         debug!("Post-STT guard rejected a likely no-speech hallucination");
                         utils::hide_recording_overlay(&ah);
                         set_tray_state(&ah, TrayIconState::Idle);
@@ -1224,16 +1431,115 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 #[cfg(test)]
 mod tests {
     use super::{
-        complete_unless_cancelled, is_blank_transcription, should_use_streaming_overlay,
-        streaming_capture_plan, strip_think_block, transcript_shape,
+        complete_unless_cancelled, gemini_failover_diagnostic_line, is_blank_transcription,
+        post_stt_allows_output, should_use_streaming_overlay, streaming_capture_plan,
+        strip_think_block, transcribe_with_gemini_empty_failover, transcript_shape,
+        GeminiFailoverDiagnostics, GeminiFallbackResult, GeminiTranscriptionOutcome,
     };
     use crate::audio_toolkit::VadPolicy;
     use crate::settings::OverlayStyle;
+    use crate::speech_guard::{
+        post_stt_verdict, CaptureEvidence, PostSttEvidence, SpeechPresenceVerdict,
+        TranscriptVerdict,
+    };
     use std::future;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ProviderCallCounts {
+        primary_prepares: usize,
+        primary_admissions: usize,
+        primary_requests: usize,
+        fallback_prepares: usize,
+        fallback_admissions: usize,
+        fallback_requests: usize,
+    }
+
+    fn run_scripted_failover(
+        speech_presence: SpeechPresenceVerdict,
+        primary_result: Result<&str, &str>,
+        fallback_result: Result<&str, &str>,
+    ) -> (GeminiTranscriptionOutcome, ProviderCallCounts) {
+        let primary_prepares = AtomicUsize::new(0);
+        let primary_admissions = AtomicUsize::new(0);
+        let primary_requests = AtomicUsize::new(0);
+        let fallback_prepares = AtomicUsize::new(0);
+        let fallback_admissions = AtomicUsize::new(0);
+        let fallback_requests = AtomicUsize::new(0);
+        let primary_result = primary_result.map(str::to_string).map_err(str::to_string);
+        let fallback_result = fallback_result.map(str::to_string).map_err(str::to_string);
+
+        let outcome = tauri::async_runtime::block_on(transcribe_with_gemini_empty_failover(
+            speech_presence,
+            || {
+                primary_prepares.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), String>(())
+            },
+            |()| {
+                primary_requests.fetch_add(1, Ordering::SeqCst);
+                future::ready(primary_result)
+            },
+            || {
+                fallback_prepares.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), String>(())
+            },
+            |()| {
+                fallback_requests.fetch_add(1, Ordering::SeqCst);
+                future::ready(fallback_result)
+            },
+            || false,
+            || {
+                primary_admissions.fetch_add(1, Ordering::SeqCst);
+                true
+            },
+            || {
+                fallback_admissions.fetch_add(1, Ordering::SeqCst);
+                true
+            },
+        ));
+
+        (
+            outcome,
+            ProviderCallCounts {
+                primary_prepares: primary_prepares.load(Ordering::SeqCst),
+                primary_admissions: primary_admissions.load(Ordering::SeqCst),
+                primary_requests: primary_requests.load(Ordering::SeqCst),
+                fallback_prepares: fallback_prepares.load(Ordering::SeqCst),
+                fallback_admissions: fallback_admissions.load(Ordering::SeqCst),
+                fallback_requests: fallback_requests.load(Ordering::SeqCst),
+            },
+        )
+    }
+
+    fn strong_speech_evidence() -> CaptureEvidence {
+        CaptureEvidence {
+            raw_sample_count: 32_000,
+            raw_sample_rate_hz: 16_000,
+            raw_duration_ms: 2_000,
+            peak_amplitude: 0.5,
+            rms_amplitude: 0.1,
+            exact_zero_samples: 0,
+            non_finite_samples: 0,
+            output_sample_count: 32_000,
+            vad_analyzed_frames: 67,
+            vad_voiced_frames: 65,
+            vad_confirmed_speech_onsets: 1,
+            vad_onset_frames: 2,
+            vad_longest_voiced_run_frames: 65,
+            vad_latest_confirmed_run_frames: 65,
+            vad_last_voiced_frame: Some(65),
+            vad_last_confirmed_speech_frame: Some(65),
+            vad_hangover_frames: 15,
+            vad_probability_frames: 67,
+            vad_mean_probability: Some(0.728_070),
+            vad_max_probability: Some(0.997_991_3),
+            vad_probability_threshold: Some(0.3),
+            vad_error_frames: 0,
+        }
+    }
 
     #[test]
     fn blank_transcription_is_detected() {
@@ -1284,6 +1590,274 @@ mod tests {
 
         cancel_thread.join().unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn speech_and_primary_empty_invoke_exactly_one_fallback() {
+        let (outcome, calls) =
+            run_scripted_failover(SpeechPresenceVerdict::Speech, Ok("  "), Ok("테스트입니다."));
+
+        assert_eq!(
+            calls,
+            ProviderCallCounts {
+                primary_prepares: 1,
+                primary_admissions: 1,
+                primary_requests: 1,
+                fallback_prepares: 1,
+                fallback_admissions: 1,
+                fallback_requests: 1,
+            }
+        );
+        match outcome {
+            GeminiTranscriptionOutcome::Completed {
+                result: Ok(transcript),
+                failover: Some(diagnostics),
+            } => {
+                assert_eq!(transcript, "테스트입니다.");
+                assert_eq!(diagnostics.fallback_result, GeminiFallbackResult::Success);
+                assert_eq!(diagnostics.fallback_chars, 7);
+                assert_eq!(diagnostics.fallback_words, 1);
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fallback_text_rejoins_existing_guard_before_paste() {
+        let (outcome, _) = run_scripted_failover(SpeechPresenceVerdict::Speech, Ok(""), Ok("네"));
+        let GeminiTranscriptionOutcome::Completed {
+            result: Ok(transcript),
+            ..
+        } = outcome
+        else {
+            panic!("fallback did not produce a transcript");
+        };
+
+        let verdict = post_stt_verdict(
+            SpeechPresenceVerdict::Speech,
+            &strong_speech_evidence(),
+            &transcript,
+            PostSttEvidence::default(),
+        );
+
+        assert_eq!(verdict, TranscriptVerdict::Accept);
+        assert!(post_stt_allows_output(verdict));
+    }
+
+    #[test]
+    fn no_speech_makes_zero_primary_and_fallback_calls() {
+        let (outcome, calls) =
+            run_scripted_failover(SpeechPresenceVerdict::NoSpeech, Ok(""), Ok("네"));
+
+        assert_eq!(outcome, GeminiTranscriptionOutcome::NotRunNoSpeech);
+        assert_eq!(
+            calls,
+            ProviderCallCounts {
+                primary_prepares: 0,
+                primary_admissions: 0,
+                primary_requests: 0,
+                fallback_prepares: 0,
+                fallback_admissions: 0,
+                fallback_requests: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn borderline_primary_empty_does_not_use_fallback_rescue() {
+        let (outcome, calls) =
+            run_scripted_failover(SpeechPresenceVerdict::Borderline, Ok(" \n"), Ok("네"));
+
+        assert_eq!(
+            outcome,
+            GeminiTranscriptionOutcome::Completed {
+                result: Ok(" \n".to_string()),
+                failover: None,
+            }
+        );
+        assert_eq!(calls.primary_requests, 1);
+        assert_eq!(calls.fallback_prepares, 0);
+        assert_eq!(calls.fallback_admissions, 0);
+        assert_eq!(calls.fallback_requests, 0);
+        assert_eq!(
+            post_stt_verdict(
+                SpeechPresenceVerdict::Borderline,
+                &strong_speech_evidence(),
+                " \n",
+                PostSttEvidence::default(),
+            ),
+            TranscriptVerdict::RejectLikelyHallucination
+        );
+    }
+
+    #[test]
+    fn escape_before_fallback_admission_starts_no_fallback_request() {
+        let cancelled = AtomicBool::new(false);
+        let fallback_requests = AtomicUsize::new(0);
+        let outcome = tauri::async_runtime::block_on(transcribe_with_gemini_empty_failover(
+            SpeechPresenceVerdict::Speech,
+            || Ok::<(), String>(()),
+            |()| future::ready(Ok::<String, String>("".to_string())),
+            || Ok::<(), String>(()),
+            |()| {
+                fallback_requests.fetch_add(1, Ordering::SeqCst);
+                future::ready(Ok::<String, String>("late text".to_string()))
+            },
+            || cancelled.load(Ordering::Acquire),
+            || true,
+            || {
+                cancelled.store(true, Ordering::Release);
+                false
+            },
+        ));
+
+        assert_eq!(outcome, GeminiTranscriptionOutcome::Cancelled);
+        assert!(cancelled.load(Ordering::Acquire));
+        assert_eq!(fallback_requests.load(Ordering::SeqCst), 0);
+    }
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn escape_during_fallback_drops_it_before_any_output_effect() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let fallback_started = Arc::new(AtomicBool::new(false));
+        let fallback_dropped = Arc::new(AtomicBool::new(false));
+        let fallback_requests = Arc::new(AtomicUsize::new(0));
+        let cancelled_for_thread = Arc::clone(&cancelled);
+        let started_for_thread = Arc::clone(&fallback_started);
+        let cancel_thread = thread::spawn(move || {
+            while !started_for_thread.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+            cancelled_for_thread.store(true, Ordering::Release);
+        });
+
+        let cancelled_for_check = Arc::clone(&cancelled);
+        let started_for_future = Arc::clone(&fallback_started);
+        let dropped_for_future = Arc::clone(&fallback_dropped);
+        let requests_for_future = Arc::clone(&fallback_requests);
+        let outcome = tauri::async_runtime::block_on(transcribe_with_gemini_empty_failover(
+            SpeechPresenceVerdict::Speech,
+            || Ok::<(), String>(()),
+            |()| future::ready(Ok::<String, String>("".to_string())),
+            || Ok::<(), String>(()),
+            move |()| {
+                requests_for_future.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let _drop_flag = DropFlag(dropped_for_future);
+                    started_for_future.store(true, Ordering::Release);
+                    future::pending::<Result<String, String>>().await
+                }
+            },
+            move || cancelled_for_check.load(Ordering::Acquire),
+            || true,
+            || true,
+        ));
+
+        cancel_thread.join().unwrap();
+        assert_eq!(outcome, GeminiTranscriptionOutcome::Cancelled);
+        assert_eq!(fallback_requests.load(Ordering::SeqCst), 1);
+        assert!(fallback_started.load(Ordering::Acquire));
+        assert!(fallback_dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn primary_nonempty_never_prepares_or_sends_fallback() {
+        let (outcome, calls) = run_scripted_failover(
+            SpeechPresenceVerdict::Speech,
+            Ok("already transcribed"),
+            Ok("unused"),
+        );
+
+        assert_eq!(
+            outcome,
+            GeminiTranscriptionOutcome::Completed {
+                result: Ok("already transcribed".to_string()),
+                failover: None,
+            }
+        );
+        assert_eq!(calls.primary_requests, 1);
+        assert_eq!(calls.fallback_prepares, 0);
+        assert_eq!(calls.fallback_admissions, 0);
+        assert_eq!(calls.fallback_requests, 0);
+    }
+
+    #[test]
+    fn primary_errors_never_prepare_or_send_fallback() {
+        for error in [
+            "authentication failed",
+            "permission denied",
+            "service unavailable",
+            "malformed response",
+        ] {
+            let (outcome, calls) =
+                run_scripted_failover(SpeechPresenceVerdict::Speech, Err(error), Ok("unused"));
+
+            assert_eq!(
+                outcome,
+                GeminiTranscriptionOutcome::Completed {
+                    result: Err(error.to_string()),
+                    failover: None,
+                }
+            );
+            assert_eq!(calls.primary_requests, 1);
+            assert_eq!(calls.fallback_prepares, 0);
+            assert_eq!(calls.fallback_admissions, 0);
+            assert_eq!(calls.fallback_requests, 0);
+        }
+    }
+
+    #[test]
+    fn fallback_empty_is_rejected_before_paste_history_or_wav() {
+        let (outcome, calls) =
+            run_scripted_failover(SpeechPresenceVerdict::Speech, Ok(""), Ok(" \n"));
+        let GeminiTranscriptionOutcome::Completed {
+            result: Ok(transcript),
+            failover: Some(diagnostics),
+        } = outcome
+        else {
+            panic!("unexpected fallback outcome");
+        };
+
+        assert_eq!(calls.fallback_requests, 1);
+        assert_eq!(diagnostics.fallback_result, GeminiFallbackResult::Empty);
+        assert_eq!(diagnostics.fallback_chars, 0);
+        assert_eq!(diagnostics.fallback_words, 0);
+        let verdict = post_stt_verdict(
+            SpeechPresenceVerdict::Speech,
+            &strong_speech_evidence(),
+            &transcript,
+            PostSttEvidence::default(),
+        );
+
+        assert_eq!(verdict, TranscriptVerdict::RejectLikelyHallucination);
+        assert!(!post_stt_allows_output(verdict));
+    }
+
+    #[test]
+    fn failover_diagnostic_contains_only_models_result_latency_and_shape() {
+        let line = gemini_failover_diagnostic_line(GeminiFailoverDiagnostics {
+            primary_latency_ms: 1_899,
+            fallback_latency_ms: 1_515,
+            fallback_result: GeminiFallbackResult::Success,
+            fallback_chars: 7,
+            fallback_words: 1,
+        });
+
+        assert_eq!(
+            line,
+            "gemini_empty_transcript_failover primary_model=gemini-3.5-transcribe primary_result=empty primary_latency_ms=1899 primary_chars=0 primary_words=0 fallback_model=gemini-3.5-flash-lite fallback_result=success fallback_latency_ms=1515 fallback_chars=7 fallback_words=1"
+        );
+        for private_value in ["private-test-key", "raw provider body", "테스트입니다"] {
+            assert!(!line.contains(private_value));
+        }
     }
 
     #[test]
