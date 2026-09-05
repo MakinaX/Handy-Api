@@ -1853,7 +1853,7 @@ mod tests {
 
         assert_eq!(
             line,
-            "gemini_empty_transcript_failover primary_model=gemini-3.5-transcribe primary_result=empty primary_latency_ms=1899 primary_chars=0 primary_words=0 fallback_model=gemini-3.5-flash-lite fallback_result=success fallback_latency_ms=1515 fallback_chars=7 fallback_words=1"
+            "gemini_empty_transcript_failover primary_model=gemini-3.5-transcribe primary_result=empty primary_latency_ms=1899 primary_chars=0 primary_words=0 fallback_model=gemini-3.8-flash fallback_result=success fallback_latency_ms=1515 fallback_chars=7 fallback_words=1"
         );
         for private_value in ["private-test-key", "raw provider body", "테스트입니다"] {
             assert!(!line.contains(private_value));

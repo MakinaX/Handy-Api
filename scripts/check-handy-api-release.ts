@@ -664,7 +664,7 @@ expect(
 );
 expect(
   gemini.includes(
-    'pub const GEMINI_EMPTY_TRANSCRIPT_FALLBACK_MODEL: &str = "gemini-3.5-flash-lite";',
+    'pub const GEMINI_EMPTY_TRANSCRIPT_FALLBACK_MODEL: &str = "gemini-3.8-flash";',
   ),
   "Gemini empty-transcript fallback model binding drifted",
 );

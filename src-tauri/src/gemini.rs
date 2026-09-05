@@ -17,7 +17,7 @@ use std::io::Cursor;
 use std::time::Duration;
 
 pub const GEMINI_TRANSCRIBE_MODEL: &str = "gemini-3.5-transcribe";
-pub const GEMINI_EMPTY_TRANSCRIPT_FALLBACK_MODEL: &str = "gemini-3.5-flash-lite";
+pub const GEMINI_EMPTY_TRANSCRIPT_FALLBACK_MODEL: &str = "gemini-3.8-flash";
 pub const GEMINI_AUDIO_SAMPLE_RATE_HZ: u32 = 16_000;
 pub const MAX_CUSTOM_VOCABULARY_TERMS: usize = 1_000;
 
@@ -202,7 +202,7 @@ impl GeminiClient {
     }
 
     /// Build the one permitted empty-transcript fallback request without
-    /// sending it. Unlike the dedicated Transcribe model, Flash-Lite receives
+    /// sending it. Unlike the dedicated Transcribe model, Flash receives
     /// the same audio with a strict transcription-only text instruction.
     pub(crate) fn prepare_empty_transcript_fallback(
         &self,
@@ -913,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_request_uses_flash_lite_strict_prompt_and_the_same_wav() {
+    fn fallback_request_uses_flash_3_8_strict_prompt_and_the_same_wav() {
         let client = GeminiClient::with_client_and_base_url(
             reqwest::Client::new(),
             "http://127.0.0.1:1234/v1beta/",
@@ -945,7 +945,7 @@ mod tests {
         );
         assert_eq!(
             fallback.0.url().path(),
-            "/v1beta/models/gemini-3.5-flash-lite:generateContent"
+            "/v1beta/models/gemini-3.8-flash:generateContent"
         );
 
         let primary_body = primary.0.body().and_then(reqwest::Body::as_bytes).unwrap();
